@@ -497,6 +497,29 @@ func (l *LocalPathLocker) Holder(realPath string) string {
 	return entry.holderID
 }
 
+// TryAcquire takes the lock only when it is immediately available. GC uses it
+// to exclude a task that is preparing or running in a persistent worktree
+// without ever waiting behind a long-lived agent process.
+func (l *LocalPathLocker) TryAcquire(realPath, holderID string) (func(), bool) {
+	if realPath == "" || holderID == "" {
+		return nil, false
+	}
+	l.mu.Lock()
+	entry, ok := l.locks[realPath]
+	if !ok {
+		entry = &pathLockEntry{}
+		l.locks[realPath] = entry
+	}
+	l.mu.Unlock()
+	if !entry.mu.TryLock() {
+		return nil, false
+	}
+	entry.mu2.Lock()
+	entry.holderID = holderID
+	entry.mu2.Unlock()
+	return l.releaser(realPath, entry), true
+}
+
 // Acquire takes the lock for realPath on behalf of taskID. If the lock is
 // already held, onWait is invoked (synchronously, before this goroutine
 // blocks) with the current holder id so callers can flip the task into the

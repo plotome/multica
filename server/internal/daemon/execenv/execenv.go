@@ -529,7 +529,14 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 		wtParams.EnvRoot = envRoot
 		wtParams.AgentName = params.AgentName
 		wtParams.TaskID = params.TaskID
+		wtParams.Provider = params.Provider
 		wtParams.ConversationKey, wtParams.ConversationID = localWorktreeConversation(params)
+		switch {
+		case params.Task.IssueID != "":
+			wtParams.ConversationKind = string(GCKindIssue)
+		case params.Task.ChatSessionID != "":
+			wtParams.ConversationKind = string(GCKindChat)
+		}
 		wtParams.WorkspaceID = params.WorkspaceID
 		wtParams.AgentID = params.Task.AgentID
 		var err error
@@ -715,6 +722,14 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 			return nil, fmt.Errorf("execenv: write sidecar manifest: %w", err)
 		}
 		logger.Warn("execenv: write sidecar manifest failed (non-fatal)", "error", err)
+	}
+	if localWorktree != nil && localWorktree.Persistent {
+		// A persistent checkout can outlive this env root. Keep a second copy
+		// beside it so a daemon crash cannot strand task-owned files and cause
+		// the next turn (or GC) to commit them as agent work.
+		if err := writeSidecarManifest(localWorktree.PersistentEntryRoot, manifest); err != nil {
+			return nil, fmt.Errorf("execenv: write persistent worktree sidecar manifest: %w", err)
+		}
 	}
 
 	// For OpenClaw, synthesize a per-task config that pins workspace to

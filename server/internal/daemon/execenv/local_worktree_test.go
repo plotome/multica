@@ -101,6 +101,97 @@ func prepareForTest(t *testing.T, localPath string) *LocalWorktree {
 	return wt
 }
 
+func persistentParamsForTest(t *testing.T, repo, persistentRoot, agentID string) LocalWorktreeParams {
+	t.Helper()
+	return LocalWorktreeParams{
+		LocalPath:        repo,
+		EnvRoot:          t.TempDir(),
+		PersistentRoot:   persistentRoot,
+		Provider:         "claude",
+		AgentName:        "J",
+		TaskID:           "11112222-3333-4444-5555-666677778888",
+		ConversationKey:  "mul-123",
+		WorkspaceID:      testBranchOwner.WorkspaceID,
+		AgentID:          agentID,
+		ConversationID:   testBranchOwner.ConversationID,
+		ConversationKind: string(GCKindIssue),
+	}
+}
+
+func removePersistentForTest(t *testing.T, wt *LocalWorktree) {
+	t.Helper()
+	record, err := readPersistentLocalWorktreeRecord(wt.PersistentEntryRoot)
+	if err != nil {
+		t.Fatalf("read persistent worktree record: %v", err)
+	}
+	if err := RemovePersistentLocalWorktree(record, worktreeTestLogger()); err != nil {
+		t.Fatalf("remove persistent worktree: %v", err)
+	}
+}
+
+func TestPersistentLocalWorktreeReusesPhysicalCheckoutAndRefreshesUserState(t *testing.T) {
+	repo := newTestRepo(t)
+	persistentRoot := t.TempDir()
+	params := persistentParamsForTest(t, repo, persistentRoot, testBranchOwner.AgentID)
+
+	first, err := PrepareLocalWorktree(params, worktreeTestLogger())
+	if err != nil {
+		t.Fatalf("first PrepareLocalWorktree: %v", err)
+	}
+	writeFile(t, filepath.Join(first.Path, "agent-output.txt"), "first turn\n")
+	if _, err := first.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatalf("first Finalize: %v", err)
+	}
+	if _, err := os.Stat(first.Path); err != nil {
+		t.Fatalf("persistent worktree removed after Finalize: %v", err)
+	}
+
+	writeFile(t, filepath.Join(repo, "tracked.txt"), "edited between turns\n")
+	params.EnvRoot = t.TempDir()
+	params.TaskID = "11112222-3333-4444-5555-999900001111"
+	second, err := PrepareLocalWorktree(params, worktreeTestLogger())
+	if err != nil {
+		t.Fatalf("second PrepareLocalWorktree: %v", err)
+	}
+	if second.Path != first.Path {
+		t.Fatalf("second worktree path = %q, want stable %q", second.Path, first.Path)
+	}
+	if got := readFile(t, filepath.Join(second.Path, "agent-output.txt")); got != "first turn\n" {
+		t.Fatalf("second turn lost earlier agent output: %q", got)
+	}
+	if got := readFile(t, filepath.Join(second.Path, "tracked.txt")); got != "edited between turns\n" {
+		t.Fatalf("second turn did not refresh user state: %q", got)
+	}
+	if _, err := second.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatalf("second Finalize: %v", err)
+	}
+	removePersistentForTest(t, second)
+}
+
+func TestPersistentLocalWorktreeSeparatesAgents(t *testing.T) {
+	repo := newTestRepo(t)
+	persistentRoot := t.TempDir()
+	first, err := PrepareLocalWorktree(persistentParamsForTest(t, repo, persistentRoot, testBranchOwner.AgentID), worktreeTestLogger())
+	if err != nil {
+		t.Fatalf("first PrepareLocalWorktree: %v", err)
+	}
+	second, err := PrepareLocalWorktree(persistentParamsForTest(t, repo, persistentRoot, "11112222-3333-4444-5555-000000000099"), worktreeTestLogger())
+	if err != nil {
+		t.Fatalf("second PrepareLocalWorktree: %v", err)
+	}
+	if first.Path == second.Path {
+		t.Fatalf("different agents share persistent worktree %q", first.Path)
+	}
+	if _, err := first.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatalf("first Finalize: %v", err)
+	}
+	if _, err := second.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatalf("second Finalize: %v", err)
+	}
+	removePersistentForTest(t, first)
+	removePersistentForTest(t, second)
+}
+
 // The agent must see the user's uncommitted work, not a clean HEAD checkout.
 // This is the property that makes worktree mode usable rather than confusing:
 // otherwise the agent silently reviews code the user hasn't got open.
@@ -2047,6 +2138,122 @@ func TestIsolatedPrepareCarriesTheStateFinalizeNeeds(t *testing.T) {
 		t.Errorf("turn two does not carry turn one's work: %v", err)
 	}
 	finalizeOK(t, second.LocalWorktree)
+}
+
+func TestIsolatedPrepareReusesPersistentPhysicalWorktree(t *testing.T) {
+	repo := newTestRepo(t)
+	workspacesRoot := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	turn := func(taskID string) *Environment {
+		t.Helper()
+		env, err := PrepareIsolated(ctx, preparationHelperTestCommand(), PrepareParams{
+			WorkspacesRoot:  workspacesRoot,
+			WorkspaceID:     testBranchOwner.WorkspaceID,
+			TaskID:          taskID,
+			IssueIdentifier: "MUL-6881",
+			Provider:        "claude",
+			AgentName:       "J",
+			Task: TaskContextForEnv{
+				IssueID: testBranchOwner.ConversationID,
+				AgentID: testBranchOwner.AgentID,
+			},
+			LocalWorktree: &LocalWorktreeParams{
+				LocalPath:      repo,
+				PersistentRoot: workspacesRoot,
+			},
+		}, worktreeTestLogger())
+		if err != nil {
+			t.Fatalf("PrepareIsolated(%s): %v", taskID, err)
+		}
+		if !env.LocalWorktree.Persistent || env.LocalWorktree.PersistentEntryRoot == "" {
+			t.Fatalf("persistent state lost across helper: %+v", env.LocalWorktree)
+		}
+		return env
+	}
+	finalize := func(env *Environment) {
+		t.Helper()
+		if err := CleanupRuntimeConfig(env.WorkDir, "claude"); err != nil {
+			t.Fatalf("CleanupRuntimeConfig: %v", err)
+		}
+		if err := CleanupSidecars(env.RootDir); err != nil {
+			t.Fatalf("CleanupSidecars: %v", err)
+		}
+		if _, err := env.LocalWorktree.Finalize(worktreeTestLogger()); err != nil {
+			t.Fatalf("Finalize: %v", err)
+		}
+	}
+
+	first := turn(turnOneTask)
+	writeFile(t, filepath.Join(first.WorkDir, "agent.txt"), "first turn\n")
+	finalize(first)
+	second := turn(turnTwoTask)
+	if second.WorkDir != first.WorkDir {
+		t.Fatalf("second cwd = %q, want stable %q", second.WorkDir, first.WorkDir)
+	}
+	if got := readFile(t, filepath.Join(second.WorkDir, "agent.txt")); got != "first turn\n" {
+		t.Fatalf("second turn lost first turn output: %q", got)
+	}
+	finalize(second)
+	removePersistentForTest(t, second.LocalWorktree)
+}
+
+func TestPersistentLocalWorktreeCrashRecoveryDoesNotCommitRuntimeArtifacts(t *testing.T) {
+	repo := newTestRepo(t)
+	workspacesRoot := t.TempDir()
+	prepare := func(taskID string) *Environment {
+		t.Helper()
+		env, err := Prepare(PrepareParams{
+			WorkspacesRoot:  workspacesRoot,
+			WorkspaceID:     testBranchOwner.WorkspaceID,
+			TaskID:          taskID,
+			IssueIdentifier: "MUL-6881",
+			Provider:        "claude",
+			AgentName:       "J",
+			Task: TaskContextForEnv{
+				IssueID: testBranchOwner.ConversationID,
+				AgentID: testBranchOwner.AgentID,
+			},
+			LocalWorktree: &LocalWorktreeParams{
+				LocalPath:      repo,
+				PersistentRoot: workspacesRoot,
+			},
+		}, worktreeTestLogger())
+		if err != nil {
+			t.Fatalf("Prepare(%s): %v", taskID, err)
+		}
+		return env
+	}
+
+	// Simulate a daemon crash: the first environment gets no sidecar cleanup
+	// and no Finalize call, while genuine agent work remains uncommitted.
+	first := prepare(turnOneTask)
+	writeFile(t, filepath.Join(first.WorkDir, "agent.txt"), "survives crash\n")
+	second := prepare(turnTwoTask)
+	if second.WorkDir != first.WorkDir {
+		t.Fatalf("second cwd = %q, want stable %q", second.WorkDir, first.WorkDir)
+	}
+	if err := CleanupRuntimeConfig(second.WorkDir, "claude"); err != nil {
+		t.Fatalf("CleanupRuntimeConfig: %v", err)
+	}
+	if err := CleanupSidecars(second.RootDir); err != nil {
+		t.Fatalf("CleanupSidecars: %v", err)
+	}
+	if _, err := second.LocalWorktree.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	if got := gitRun(t, repo, "show", second.LocalWorktree.Branch+":agent.txt"); got != "survives crash" {
+		t.Fatalf("recovered branch lost agent output: %q", got)
+	}
+	tree := gitRun(t, repo, "ls-tree", "-r", "--name-only", second.LocalWorktree.Branch)
+	for _, artifact := range []string{"CLAUDE.md", ".agent_context", ".multica", ".claude/skills"} {
+		if strings.Contains(tree, artifact) {
+			t.Errorf("recovered branch committed runtime artifact %q:\n%s", artifact, tree)
+		}
+	}
+	removePersistentForTest(t, second.LocalWorktree)
 }
 
 // A read-only turn drops its branch — which the daemon could not do either

@@ -559,6 +559,42 @@ func TestCodexTurnNotificationGateDropsResumeReplayAndOtherTurns(t *testing.T) {
 	}
 }
 
+func TestCodexWarmTurnNotificationGateRequiresCurrentStart(t *testing.T) {
+	t.Parallel()
+
+	gate := &codexTurnNotificationGate{requireStarted: true}
+	gate.arm()
+	if gate.accept("turn/completed", map[string]any{
+		"threadId": "thr-resumed",
+		"turn":     map[string]any{"id": "turn-previous", "status": "completed"},
+	}) {
+		t.Fatal("warm gate accepted a late completion before current turn/started")
+	}
+	if gate.accept("thread/status/changed", map[string]any{
+		"threadId": "thr-resumed",
+		"status":   map[string]any{"type": "idle"},
+	}) {
+		t.Fatal("warm gate accepted a late idle status before current turn/started")
+	}
+	if gate.accept("codex/event", map[string]any{
+		"msg": map[string]any{"type": "task_complete"},
+	}) {
+		t.Fatal("warm gate accepted a late legacy completion before current task_started")
+	}
+	if !gate.accept("turn/started", map[string]any{
+		"threadId": "thr-resumed",
+		"turn":     map[string]any{"id": "turn-current"},
+	}) {
+		t.Fatal("warm gate rejected current turn/started")
+	}
+	if !gate.accept("turn/completed", map[string]any{
+		"threadId": "thr-resumed",
+		"turn":     map[string]any{"id": "turn-current", "status": "completed"},
+	}) {
+		t.Fatal("warm gate rejected current completion")
+	}
+}
+
 func TestCodexRawTurnCompletedSubtractsCachedInput(t *testing.T) {
 	t.Parallel()
 

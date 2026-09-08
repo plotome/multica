@@ -346,6 +346,14 @@ type Daemon struct {
 	skillCache *SkillBundleCache
 	logger     *slog.Logger
 
+	// codexWarmPool is lazy for focused unit tests that construct Daemon
+	// literals. warmPoolMu protects initialization only; the pool owns its own
+	// synchronization. warmHostFactory is a test seam.
+	warmPoolMu            sync.Mutex
+	codexWarmPool         *warmSessionPool
+	warmHostFactory       warmHostFactory
+	warmConversationLocks *LocalPathLocker
+
 	mu           sync.Mutex
 	workspaces   map[string]*workspaceState
 	runtimeIndex map[string]Runtime // runtimeID -> Runtime for provider lookups
@@ -614,6 +622,7 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
 		activeStores:              make(map[string]int),
 		deletingStores:            make(map[string]bool),
 		localPathLocks:            NewLocalPathLocker(),
+		warmConversationLocks:     NewLocalPathLocker(),
 		runtimeGoneInflight:       make(map[string]struct{}),
 		pendingWorkInflight:       make(map[string]struct{}),
 		pendingWorkLastRun:        make(map[string]time.Time),
@@ -1914,6 +1923,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	d.cancelFunc = cancel
 	d.rootCtx = ctx
+	defer d.closeWarmPools()
 
 	// Bind health port early to detect another running daemon.
 	healthLn, err := d.listenHealth()
@@ -1998,6 +2008,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go d.gcLoop(ctx)
 	go d.autoUpdateLoop(ctx)
 	go d.tokenRenewalLoop(ctx)
+	go d.warmPoolSweepLoop(ctx)
 
 	// Preflight succeeded and the background loops are up: the daemon has
 	// registered its runtimes and can now claim and run tasks. Flip /health
@@ -6096,6 +6107,18 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.WorkspaceID == "" {
 		return TaskResult{}, fmt.Errorf("refusing to spawn agent: task has no workspace_id (task_id=%s)", task.ID)
 	}
+	// Serialize the whole mutable environment lifecycle for a warm-eligible
+	// conversation, not merely the provider turn. Prepare/Reuse rewrites the
+	// shared runtime brief, skill sidecars and task shell policy; acquiring only
+	// at Backend.Execute would let two same-conversation tasks race on disk
+	// before either reached the process pool.
+	if provider == "codex" && task.ID != "" && (task.IssueID != "" || task.ChatSessionID != "") {
+		release, err := d.codexConversationLocker().Acquire(ctx, codexWarmKey(task), task.ID, nil)
+		if err != nil {
+			return TaskResult{}, fmt.Errorf("wait for codex conversation lease: %w", err)
+		}
+		defer release()
+	}
 
 	prepareTimeout := d.effectiveTaskPrepareTimeout()
 	prepareCtx, cancelPrepare := context.WithTimeoutCause(ctx, prepareTimeout, errTaskPrepareTimeout)
@@ -6858,7 +6881,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// families go through New. This is the single production boundary — the
 	// daemon never calls agent.New or agent.NewRuntime directly, so the two
 	// factories stay meaning exactly one thing each.
-	backend, err := agent.ResolveBackend(provider, agent.Config{
+	backendCfg := agent.Config{
 		ExecutablePath: entry.Path,
 		LaunchPrefix:   profileFixedArgs,
 		CLIVersion:     resolvedVersion,
@@ -6869,7 +6892,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		DaemonVersion:  d.cfg.CLIVersion,
 		CodexVersion:   codexVersion,
 		BuiltinRuntime: !usesCustomProfileCommand,
-	})
+	}
+	backend, err := agent.ResolveBackend(provider, backendCfg)
 	if err != nil {
 		return TaskResult{}, fmt.Errorf("create agent backend: %w", err)
 	}
@@ -7013,6 +7037,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		ClaudeSettingsPath:     env.ClaudeSettingsPath,
 		QwenpawWorkspace:       env.QwenpawWorkspace,
 	}
+	if provider == "codex" {
+		execOpts.CodexShellEnv = codexTurnShellEnvironment(
+			os.Environ(), agentEnv, codexShellAuthorizedCustomEnvNames(agentCustomEnv),
+		)
+	}
 	// Some providers do not reliably load the per-task runtime config files we
 	// write into the task workdir:
 	//   - openclaw is pinned to the task workdir via the per-task config we
@@ -7037,6 +7066,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// context and bloats every turn.
 	if providerNeedsInlineSystemPrompt(provider) {
 		execOpts.SystemPrompt = runtimeBrief
+	}
+	if warmBackend := d.pooledCodexBackend(task, backendCfg, execOpts, env, usesCustomProfileCommand, backend); warmBackend != nil {
+		backend = warmBackend
 	}
 
 	// A quick-actions refresh task from a server that predates server-side

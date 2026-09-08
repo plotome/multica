@@ -18,13 +18,13 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-type warmHostFactory func(context.Context, string, agent.Config, agent.ExecOptions) (agent.WarmHost, error)
+type warmHostFactory func(context.Context, agent.Config, agent.ExecOptions) (agent.WarmHost, error)
 
 type pooledCodexBackend struct {
 	pool        *warmSessionPool
 	key         string
 	fingerprint string
-	factory     func(context.Context) (warmSessionHost, error)
+	factory     func(context.Context) (agent.WarmHost, error)
 	fallback    agent.Backend
 	logger      interface {
 		Debug(string, ...any)
@@ -35,16 +35,31 @@ type pooledCodexBackend struct {
 func (b *pooledCodexBackend) Execute(ctx context.Context, prompt string, opts agent.ExecOptions) (*agent.Session, error) {
 	lease, hit, err := b.pool.acquire(ctx, b.key, b.fingerprint, b.factory)
 	if err != nil {
-		if b.fallback != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		if b.fallback != nil &&
+			!errors.Is(err, context.Canceled) &&
+			!errors.Is(err, context.DeadlineExceeded) &&
+			!errors.Is(err, errWarmSessionCleanupUnconfirmed) {
 			b.logger.Warn("codex warm host unavailable; using cold backend", "error", err)
 			return b.fallback.Execute(ctx, prompt, opts)
 		}
 		return nil, err
 	}
-	host, ok := lease.Host().(agent.WarmHost)
-	if !ok {
-		_ = lease.Release(context.Background(), false)
-		return nil, errors.New("warm pool returned a non-agent host")
+	host := lease.Host()
+	if !host.Healthy() {
+		if releaseErr := lease.Release(ctx, false); releaseErr != nil {
+			return nil, releaseErr
+		}
+		// An app-server can exit while idle. Rebuild once before the turn has
+		// been submitted; after Execute starts, replay is never implicit.
+		lease, hit, err = b.pool.acquire(ctx, b.key, b.fingerprint, b.factory)
+		if err != nil {
+			return nil, err
+		}
+		host = lease.Host()
+		if !host.Healthy() {
+			_ = lease.Release(context.Background(), false)
+			return nil, errors.New("warm pool replacement host is not healthy")
+		}
 	}
 	b.logger.Debug("codex warm pool lease acquired", "hit", hit, "key_hash", shortWarmHash(b.key))
 	session, err := host.Execute(ctx, prompt, opts)
@@ -91,6 +106,12 @@ func (b *pooledCodexBackend) Execute(ctx context.Context, prompt string, opts ag
 			releaseErr := lease.Release(context.Background(), reusable && !retryCandidate)
 			if releaseErr != nil {
 				b.logger.Warn("codex warm pool release failed", "error", releaseErr, "reusable", reusable)
+				result.Status = "failed"
+				if result.Error == "" {
+					result.Error = releaseErr.Error()
+				} else {
+					result.Error = errors.Join(errors.New(result.Error), releaseErr).Error()
+				}
 			}
 			if !retryCandidate || releaseErr != nil || ctx.Err() != nil {
 				if holdingPins {
@@ -160,7 +181,9 @@ type pinnedWarmHost struct {
 
 func (h *pinnedWarmHost) Close(ctx context.Context) error {
 	err := h.WarmHost.Close(ctx)
-	h.once.Do(h.onClose)
+	if err == nil {
+		h.once.Do(h.onClose)
+	}
 	return err
 }
 
@@ -173,12 +196,12 @@ func (d *Daemon) pooledCodexBackend(task Task, cfg agent.Config, opts agent.Exec
 	fingerprint := codexWarmFingerprint(task, cfg, opts, env)
 	return &pooledCodexBackend{
 		pool: pool, key: key, fingerprint: fingerprint, logger: d.logger, fallback: fallback,
-		factory: func(ctx context.Context) (warmSessionHost, error) {
+		factory: func(ctx context.Context) (agent.WarmHost, error) {
 			// The task's ordinary active-root reference ends when runTask returns;
 			// retain a second reference for the app-server's whole idle lifetime so
 			// GC cannot remove CODEX_HOME or the cwd beneath a warm process.
 			d.markActiveEnvRoot(env.RootDir)
-			host, err := d.newWarmHost(ctx, "codex", cfg, opts)
+			host, err := d.newWarmHost(ctx, cfg, opts)
 			if err != nil {
 				d.unmarkActiveEnvRoot(env.RootDir)
 				return nil, err
@@ -201,19 +224,10 @@ func codexWarmEligible(task Task, opts agent.ExecOptions, env *execenv.Environme
 	if len(task.RemoteMCPConnections) != 0 || len(task.ConnectedApps) != 0 || len(opts.McpConfig) != 0 {
 		return false
 	}
-	if codexArgsConfigureMCP(opts.ExtraArgs) || codexArgsConfigureMCP(opts.CustomArgs) || codexConfigHasMCP(env.CodexHome) {
+	if agent.CodexArgsConfigureMCP(opts.ExtraArgs) || agent.CodexArgsConfigureMCP(opts.CustomArgs) || codexConfigHasMCP(env.CodexHome) {
 		return false
 	}
 	return true
-}
-
-func codexArgsConfigureMCP(args []string) bool {
-	for _, arg := range args {
-		if strings.Contains(strings.ToLower(arg), "mcp_servers.") {
-			return true
-		}
-	}
-	return false
 }
 
 // codexConfigHasMCP detects inherited config.toml MCP processes. Their
@@ -342,11 +356,11 @@ func (d *Daemon) codexConversationLocker() *LocalPathLocker {
 	return d.warmConversationLocks
 }
 
-func (d *Daemon) newWarmHost(ctx context.Context, provider string, cfg agent.Config, opts agent.ExecOptions) (agent.WarmHost, error) {
+func (d *Daemon) newWarmHost(ctx context.Context, cfg agent.Config, opts agent.ExecOptions) (agent.WarmHost, error) {
 	if d.warmHostFactory != nil {
-		return d.warmHostFactory(ctx, provider, cfg, opts)
+		return d.warmHostFactory(ctx, cfg, opts)
 	}
-	return agent.NewWarmHost(ctx, provider, cfg, opts)
+	return agent.NewWarmHost(ctx, "codex", cfg, opts)
 }
 
 func (d *Daemon) warmPoolSweepLoop(ctx context.Context) {

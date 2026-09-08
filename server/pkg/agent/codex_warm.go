@@ -227,6 +227,7 @@ func newCodexWarmHostOnce(startupCtx context.Context, cfg Config, opts ExecOptio
 		t := h.active.Load()
 		return t != nil && t.gate.accept(method, params)
 	}
+	h.client.requireExplicitTurnCompletion = true
 	h.client.onMessage = func(msg Message) {
 		logCodexAgentMessage(cfg.Logger, msg)
 		if t := h.active.Load(); t != nil {
@@ -278,7 +279,7 @@ func newCodexWarmHostOnce(startupCtx context.Context, cfg Config, opts ExecOptio
 		return nil, fmt.Errorf("codex initialize failed: %w", err)
 	}
 	h.client.notify("initialized")
-	h.baselineProcesses, err = snapshotCodexWarmProcessGroup(cmd)
+	h.baselineProcesses, err = snapshotCodexWarmProcessGroup(startupCtx, cmd)
 	if err != nil {
 		h.poison.Store(true)
 		_ = h.Close(context.Background())
@@ -321,7 +322,7 @@ func (h *codexWarmHost) Execute(ctx context.Context, prompt string, opts ExecOpt
 	}
 	t := &codexWarmTurn{
 		messages: make(chan Message, 256), done: make(chan bool, 1),
-		activity: make(chan string, 256), gate: &codexTurnNotificationGate{},
+		activity: make(chan string, 256), gate: &codexTurnNotificationGate{requireStarted: true},
 	}
 	if !h.active.CompareAndSwap(nil, t) {
 		return nil, errors.New("codex warm host already has an active turn")
@@ -337,25 +338,11 @@ func (h *codexWarmHost) runTurn(ctx context.Context, t *codexWarmTurn, results c
 	runCtx, cancel := runContext(ctx, opts.Timeout)
 	defer cancel()
 
-	// Reset the per-turn fields read by the single stdout reader. No provider
-	// notification is expected while the host is idle, and active is installed
-	// before these fields become relevant to the new RPC sequence.
 	c := h.client
-	// Config belongs to the long-lived host, but task attribution does not.
-	// Refresh the only per-task field used by codexClient logging before each
-	// serialized RPC sequence.
-	c.cfg.TaskID = opts.CodexShellEnv["MULTICA_TASK_ID"]
-	c.threadID, c.turnID = "", ""
-	c.turnStarted = false
-	c.completedTurnIDs = make(map[string]bool)
-	c.notificationProtocol = "unknown"
-	c.threadStartSent = false
-	c.turnErrorMu.Lock()
-	c.turnError = ""
-	c.turnErrorMu.Unlock()
-	c.usageMu.Lock()
-	c.usage = TokenUsage{}
-	c.usageMu.Unlock()
+	// The stdout reader outlives turns. Reset its state under the same mutex
+	// used by notification dispatch so a late event cannot race the next task's
+	// attribution, IDs, completion map, or usage accumulator.
+	c.resetTurnState(opts.CodexShellEnv["MULTICA_TASK_ID"])
 
 	status, errText, threadID := "completed", "", ""
 	resumed := false
@@ -375,7 +362,7 @@ func (h *codexWarmHost) runTurn(ctx context.Context, t *codexWarmTurn, results c
 		h.finishTurn(t, results, Result{Status: status, Error: errText, DurationMs: time.Since(start).Milliseconds(), ResumeRejected: isCodexResumeOverflow(opts, err)})
 		return
 	}
-	c.threadID = threadID
+	c.setThreadID(threadID)
 	turnParams := map[string]any{
 		"threadId": threadID,
 		"input":    codexTurnInput(prompt, opts.ResumeExpected, resumed, opts.ResumeContinuityNotice),
@@ -482,9 +469,10 @@ func (h *codexWarmHost) runTurn(ctx context.Context, t *codexWarmTurn, results c
 			}
 		}
 	}
-	if h.poison.Load() && c.turnID != "" {
+	_, turnID := c.turnIDs()
+	if h.poison.Load() && turnID != "" {
 		interruptCtx, interruptCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		_, _ = c.request(interruptCtx, "turn/interrupt", map[string]any{"threadId": threadID, "turnId": c.turnID})
+		_, _ = c.request(interruptCtx, "turn/interrupt", map[string]any{"threadId": threadID, "turnId": turnID})
 		interruptCancel()
 	}
 
@@ -525,43 +513,56 @@ func (h *codexWarmHost) finishTurn(t *codexWarmTurn, results chan Result, result
 	results <- result
 }
 
-func (h *codexWarmHost) Close(context.Context) error {
+func (h *codexWarmHost) Close(ctx context.Context) error {
 	if h == nil {
 		return nil
 	}
 	h.closeOnce.Do(func() {
-		h.closed.Store(true)
-		h.poison.Store(true)
-		_ = h.stdin.Close()
-		grace := codexGracefulShutdown()
-		select {
-		case <-h.readerDone:
-		case <-time.After(grace):
-			h.cancel()
-		}
-		waitCh := make(chan struct{})
-		go func() {
-			h.waitErr = h.cmd.Wait()
-			close(waitCh)
-		}()
-		select {
-		case <-waitCh:
-		case <-time.After(grace):
-			// The stdout scanner may have stopped on an oversized frame while
-			// the child remains blocked writing. Force the owned process tree
-			// down before returning the strict pool slot.
-			h.cancel()
-			<-waitCh
-		}
+		go h.closeProcess()
+	})
+	select {
+	case <-h.waitDone:
+		return h.cleanupErr
+	case <-ctx.Done():
+		return fmt.Errorf("close codex warm host: %w", context.Cause(ctx))
+	}
+}
+
+func (h *codexWarmHost) closeProcess() {
+	defer close(h.waitDone)
+	grace := codexGracefulShutdown()
+	h.closed.Store(true)
+	h.poison.Store(true)
+	_ = h.stdin.Close()
+	select {
+	case <-h.readerDone:
+	case <-time.After(grace):
 		h.cancel()
-		if h.cmd.ProcessState == nil || !waitProcessGroupGone(h.cmd, grace) {
-			h.cleanupErr = errors.New("codex warm host process-tree cleanup could not be confirmed")
+	}
+
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- h.cmd.Wait() }()
+	select {
+	case h.waitErr = <-waitCh:
+	case <-time.After(grace):
+		// The stdout scanner may have stopped on an oversized frame while the
+		// child remains blocked writing. Force the owned process tree down, but
+		// do not wait forever before quarantining its strict-capacity slot.
+		h.cancel()
+		select {
+		case h.waitErr = <-waitCh:
+		case <-time.After(grace):
+			h.cleanupErr = errors.New("codex warm host process wait could not be confirmed")
 		}
+	}
+	h.cancel()
+	if h.cleanupErr == nil && (h.cmd.ProcessState == nil || !waitProcessGroupGone(h.cmd, grace)) {
+		h.cleanupErr = errors.New("codex warm host process-tree cleanup could not be confirmed")
+	}
+	if h.cleanupErr == nil {
 		releaseProcessGroup(h.cmd)
 		activeCodexLaunches.Add(-1)
-		close(h.waitDone)
-		h.cfg.Logger.Info("codex warm lifecycle", "phase", "closed", "pid", h.cmd.Process.Pid, "wait_error", h.waitErr)
-	})
-	<-h.waitDone
-	return h.cleanupErr
+	}
+	h.cfg.Logger.Info("codex warm lifecycle", "phase", "closed", "pid", h.cmd.Process.Pid,
+		"wait_error", h.waitErr, "cleanup_error", h.cleanupErr)
 }

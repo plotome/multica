@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -26,12 +27,14 @@ func TestCodexWarmHostReusesProcessAndRefreshesTurnEnvironment(t *testing.T) {
 		`echo '{"jsonrpc":"2.0","id":3,"result":{}}'`+"\n"+
 		`echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr-warm","turn":{"id":"turn-1"}}}'`+"\n"+
 		`echo '{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-warm","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","phase":"final_answer","text":"first"}}}'`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr-warm","turn":{"id":"turn-1","status":"completed"}}}'`+"\n"+
 		`read resume; printf '%s\n' "$resume" >> "$RECORD"`+"\n"+
 		`echo '{"jsonrpc":"2.0","id":4,"result":{"thread":{"id":"thr-warm"}}}'`+"\n"+
 		`read turn2`+"\n"+
 		`echo '{"jsonrpc":"2.0","id":5,"result":{}}'`+"\n"+
 		`echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr-warm","turn":{"id":"turn-2"}}}'`+"\n"+
 		`echo '{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-warm","turnId":"turn-2","item":{"type":"agentMessage","id":"msg-2","phase":"final_answer","text":"second"}}}'`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr-warm","turn":{"id":"turn-2","status":"completed"}}}'`+"\n"+
 		`while read rest; do :; done`+"\n")
 
 	host, err := NewWarmHost(t.Context(), "codex", Config{
@@ -93,6 +96,7 @@ func TestCodexWarmHostPrepareIdleKillsTurnBackgroundProcess(t *testing.T) {
 		`echo '{"jsonrpc":"2.0","id":3,"result":{}}'`+"\n"+
 		`echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr-child","turn":{"id":"turn-child"}}}'`+"\n"+
 		`echo '{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-child","turnId":"turn-child","item":{"type":"agentMessage","id":"msg-child","phase":"final_answer","text":"done"}}}'`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr-child","turn":{"id":"turn-child","status":"completed"}}}'`+"\n"+
 		`while read rest; do :; done`+"\n")
 	host, err := NewWarmHost(t.Context(), "codex", Config{
 		ExecutablePath: fake,
@@ -207,6 +211,33 @@ func TestCodexWarmHostCancellationDuringResumePoisonsHost(t *testing.T) {
 	}
 	if err := host.Close(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCodexWarmHostCloseHonorsContextAndCanBeObservedLater(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+	// Not parallel: this test overrides the package-wide graceful timeout.
+	codexGracefulShutdownTimeoutNanos.Store(int64(100 * time.Millisecond))
+	t.Cleanup(func() { codexGracefulShutdownTimeoutNanos.Store(0) })
+	fake := writeFakeCodexAppServer(t, ""+
+		`read init`+"\n"+
+		`echo '{"jsonrpc":"2.0","id":1,"result":{}}'`+"\n"+
+		`read initialized`+"\n"+
+		`while :; do sleep 1; done`+"\n")
+	host, err := NewWarmHost(t.Context(), "codex", Config{ExecutablePath: fake}, ExecOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+	defer cancel()
+	if err := host.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("short close error = %v, want context deadline", err)
+	}
+	if err := host.Close(context.Background()); err != nil {
+		t.Fatalf("observe completed close: %v", err)
 	}
 }
 

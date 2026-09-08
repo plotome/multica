@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/multica-ai/multica/server/pkg/agent"
 )
 
 const (
@@ -14,34 +16,38 @@ const (
 	defaultWarmSessionSweepInterval  = time.Minute
 )
 
-var errWarmSessionPoolClosed = errors.New("warm session pool is closed")
+var (
+	errWarmSessionPoolClosed         = errors.New("warm session pool is closed")
+	errWarmSessionCleanupUnconfirmed = errors.New("warm session cleanup could not be confirmed")
+)
 
-// warmSessionHost is a provider process which can serve multiple sequential
-// turns for one conversation. A host is never shared by two conversations.
-type warmSessionHost interface {
-	Close(context.Context) error
-}
+type warmEntryState uint8
+
+const (
+	warmEntryStarting warmEntryState = iota
+	warmEntryLeased
+	warmEntryIdle
+	warmEntryClosing
+	warmEntryQuarantined
+)
 
 type warmPoolEntry struct {
 	key         string
 	fingerprint string
-	host        warmSessionHost
-	busy        bool
-	starting    bool
+	host        agent.WarmHost
+	state       warmEntryState
 	idleSince   time.Time
 }
 
-// warmSessionPool owns the live provider processes for one provider. maxLive
-// is a strict process ceiling: starting and closing hosts consume a slot too.
-// This is intentionally different from an ordinary cache size, where an
-// eviction can remove an entry before the resource has actually stopped.
+// warmSessionPool owns one Codex host per conversation. entries is also the
+// strict capacity ledger: starting, closing, and quarantined hosts remain in
+// the map until cleanup is positively confirmed.
 type warmSessionPool struct {
 	mu      sync.Mutex
 	maxLive int
 	idleTTL time.Duration
 	now     func() time.Time
 	entries map[string]*warmPoolEntry
-	live    int
 	closing bool
 	changed chan struct{}
 }
@@ -67,33 +73,27 @@ func (p *warmSessionPool) notifyLocked() {
 	p.changed = make(chan struct{})
 }
 
-// warmSessionLease gives one task exclusive use of a conversation host.
-// Release must be called exactly once. reusable=false poisons and closes the
-// host before returning its strict-capacity slot to another waiter.
 type warmSessionLease struct {
 	pool  *warmSessionPool
 	entry *warmPoolEntry
 	once  sync.Once
 }
 
-func (l *warmSessionLease) Host() warmSessionHost { return l.entry.host }
+func (l *warmSessionLease) Host() agent.WarmHost { return l.entry.host }
 
 func (l *warmSessionLease) Release(ctx context.Context, reusable bool) error {
-	var releaseErr error
-	l.once.Do(func() {
-		releaseErr = l.pool.release(ctx, l.entry, reusable)
-	})
-	return releaseErr
+	var err error
+	l.once.Do(func() { err = l.pool.release(ctx, l.entry, reusable) })
+	return err
 }
 
-// acquire serialises turns for the same key, evicts the least-recently-used
-// idle host when the provider is at capacity, and otherwise waits rather than
-// exceeding maxLive. create runs without the pool mutex held.
+// acquire serializes a conversation, performs LRU eviction at capacity, and
+// runs host creation/closure outside the mutex.
 func (p *warmSessionPool) acquire(
 	ctx context.Context,
 	key string,
 	fingerprint string,
-	create func(context.Context) (warmSessionHost, error),
+	create func(context.Context) (agent.WarmHost, error),
 ) (*warmSessionLease, bool, error) {
 	if key == "" {
 		return nil, false, errors.New("warm session key is empty")
@@ -108,91 +108,98 @@ func (p *warmSessionPool) acquire(
 			p.mu.Unlock()
 			return nil, false, errWarmSessionPoolClosed
 		}
-
 		if entry := p.entries[key]; entry != nil {
-			switch {
-			case entry.fingerprint != fingerprint:
-				if entry.busy || entry.starting {
-					changed := p.changed
+			switch entry.state {
+			case warmEntryIdle:
+				if entry.fingerprint == fingerprint {
+					entry.state = warmEntryLeased
+					entry.idleSince = time.Time{}
 					p.mu.Unlock()
-					if err := waitWarmPoolChange(ctx, changed); err != nil {
-						return nil, false, err
-					}
-					continue
+					return &warmSessionLease{pool: p, entry: entry}, true, nil
 				}
-				delete(p.entries, key)
+				entry.state = warmEntryClosing
 				p.mu.Unlock()
-				p.closeHost(ctx, entry.host)
+				if err := p.closeEntry(ctx, entry); err != nil {
+					return nil, false, err
+				}
 				continue
-			case entry.busy || entry.starting:
+			case warmEntryQuarantined:
+				entry.state = warmEntryClosing
+				p.mu.Unlock()
+				if err := p.closeEntry(ctx, entry); err != nil {
+					return nil, false, err
+				}
+				continue
+			default:
 				changed := p.changed
 				p.mu.Unlock()
 				if err := waitWarmPoolChange(ctx, changed); err != nil {
 					return nil, false, err
 				}
 				continue
-			default:
-				entry.busy = true
-				entry.idleSince = time.Time{}
-				p.mu.Unlock()
-				return &warmSessionLease{pool: p, entry: entry}, true, nil
 			}
 		}
 
-		if p.live < p.maxLive {
-			entry := &warmPoolEntry{key: key, fingerprint: fingerprint, busy: true, starting: true}
+		if len(p.entries) < p.maxLive {
+			entry := &warmPoolEntry{key: key, fingerprint: fingerprint, state: warmEntryStarting}
 			p.entries[key] = entry
-			p.live++
 			p.mu.Unlock()
+			host, createErr := create(ctx)
 
-			host, err := create(ctx)
 			p.mu.Lock()
-			entry.starting = false
-			if err != nil || p.closing {
-				delete(p.entries, key)
-				closing := p.closing
-				p.mu.Unlock()
-				if host != nil {
-					_ = host.Close(context.Background())
-				}
-				p.mu.Lock()
-				p.live--
+			entry.host = host
+			closing := p.closing
+			if createErr == nil && host != nil && !closing {
+				entry.state = warmEntryLeased
 				p.notifyLocked()
 				p.mu.Unlock()
-				if err != nil {
-					return nil, false, fmt.Errorf("start warm session host: %w", err)
-				}
-				if closing {
-					return nil, false, errWarmSessionPoolClosed
-				}
-				return nil, false, errors.New("warm session host factory returned nil")
+				return &warmSessionLease{pool: p, entry: entry}, false, nil
 			}
 			if host == nil {
 				delete(p.entries, key)
-				p.live--
 				p.notifyLocked()
 				p.mu.Unlock()
-				return nil, false, errors.New("warm session host factory returned nil")
+				return nil, false, warmCreateError(createErr, closing)
 			}
-			entry.host = host
-			p.notifyLocked()
+			entry.state = warmEntryClosing
 			p.mu.Unlock()
-			return &warmSessionLease{pool: p, entry: entry}, false, nil
+			closeErr := p.closeEntry(context.Background(), entry)
+			return nil, false, errors.Join(warmCreateError(createErr, closing), closeErr)
 		}
 
 		victim := p.oldestIdleLocked()
-		if victim == nil {
-			changed := p.changed
+		if victim != nil {
+			victim.state = warmEntryClosing
 			p.mu.Unlock()
-			if err := waitWarmPoolChange(ctx, changed); err != nil {
+			if err := p.closeEntry(ctx, victim); err != nil {
 				return nil, false, err
 			}
 			continue
 		}
-		delete(p.entries, victim.key)
+		if victim = p.firstQuarantinedLocked(); victim != nil {
+			victim.state = warmEntryClosing
+			p.mu.Unlock()
+			if err := p.closeEntry(ctx, victim); err != nil {
+				return nil, false, err
+			}
+			continue
+		}
+		changed := p.changed
 		p.mu.Unlock()
-		p.closeHost(ctx, victim.host)
+		if err := waitWarmPoolChange(ctx, changed); err != nil {
+			return nil, false, err
+		}
 	}
+}
+
+func warmCreateError(createErr error, closing bool) error {
+	if createErr != nil {
+		return fmt.Errorf("start warm session host: %w", createErr)
+	}
+	if closing {
+		return errWarmSessionPoolClosed
+	}
+	return errors.New("warm session host factory returned nil")
 }
 
 func waitWarmPoolChange(ctx context.Context, changed <-chan struct{}) error {
@@ -207,64 +214,83 @@ func waitWarmPoolChange(ctx context.Context, changed <-chan struct{}) error {
 func (p *warmSessionPool) oldestIdleLocked() *warmPoolEntry {
 	var oldest *warmPoolEntry
 	for _, entry := range p.entries {
-		if entry.busy || entry.starting || entry.host == nil {
-			continue
-		}
-		if oldest == nil || entry.idleSince.Before(oldest.idleSince) {
+		if entry.state == warmEntryIdle && (oldest == nil || entry.idleSince.Before(oldest.idleSince)) {
 			oldest = entry
 		}
 	}
 	return oldest
 }
 
+func (p *warmSessionPool) firstQuarantinedLocked() *warmPoolEntry {
+	for _, entry := range p.entries {
+		if entry.state == warmEntryQuarantined {
+			return entry
+		}
+	}
+	return nil
+}
+
+func (p *warmSessionPool) allQuarantinedLocked() bool {
+	if len(p.entries) == 0 {
+		return false
+	}
+	for _, entry := range p.entries {
+		if entry.state != warmEntryQuarantined {
+			return false
+		}
+	}
+	return true
+}
+
 func (p *warmSessionPool) release(ctx context.Context, entry *warmPoolEntry, reusable bool) error {
 	p.mu.Lock()
-	current := p.entries[entry.key]
-	if current != entry {
+	if p.entries[entry.key] != entry || entry.state != warmEntryLeased {
 		p.mu.Unlock()
 		return nil
 	}
 	if reusable && !p.closing {
-		entry.busy = false
+		entry.state = warmEntryIdle
 		entry.idleSince = p.now()
 		p.notifyLocked()
 		p.mu.Unlock()
 		return nil
 	}
-	delete(p.entries, entry.key)
+	entry.state = warmEntryClosing
 	p.mu.Unlock()
-	return p.closeHost(ctx, entry.host)
+	return p.closeEntry(ctx, entry)
 }
 
-func (p *warmSessionPool) closeHost(ctx context.Context, host warmSessionHost) error {
-	var err error
-	if host != nil {
-		err = host.Close(ctx)
-	}
+func (p *warmSessionPool) closeEntry(ctx context.Context, entry *warmPoolEntry) error {
+	err := entry.host.Close(ctx)
 	p.mu.Lock()
-	p.live--
+	defer p.mu.Unlock()
+	if p.entries[entry.key] != entry {
+		return err
+	}
+	if err != nil {
+		entry.state = warmEntryQuarantined
+		p.notifyLocked()
+		return fmt.Errorf("%w: %v", errWarmSessionCleanupUnconfirmed, err)
+	}
+	delete(p.entries, entry.key)
 	p.notifyLocked()
-	p.mu.Unlock()
-	return err
+	return nil
 }
 
-// sweep closes idle hosts whose TTL has elapsed. Busy hosts are never evicted.
 func (p *warmSessionPool) sweep(ctx context.Context) error {
 	now := p.now()
-	var expired []*warmPoolEntry
 	p.mu.Lock()
-	for key, entry := range p.entries {
-		if entry.busy || entry.starting || entry.idleSince.IsZero() || now.Sub(entry.idleSince) < p.idleTTL {
-			continue
+	var expired []*warmPoolEntry
+	for _, entry := range p.entries {
+		if entry.state == warmEntryIdle && now.Sub(entry.idleSince) >= p.idleTTL {
+			entry.state = warmEntryClosing
+			expired = append(expired, entry)
 		}
-		delete(p.entries, key)
-		expired = append(expired, entry)
 	}
 	p.mu.Unlock()
-
 	var errs []error
 	for _, entry := range expired {
-		if err := p.closeHost(ctx, entry.host); err != nil {
+		if err := p.closeEntry(ctx, entry); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -273,47 +299,34 @@ func (p *warmSessionPool) sweep(ctx context.Context) error {
 
 func (p *warmSessionPool) close(ctx context.Context) error {
 	p.mu.Lock()
-	if p.closing {
-		p.mu.Unlock()
-		for {
-			p.mu.Lock()
-			if p.live == 0 {
-				p.mu.Unlock()
-				return nil
-			}
-			changed := p.changed
-			p.mu.Unlock()
-			if err := waitWarmPoolChange(ctx, changed); err != nil {
-				return err
-			}
-		}
-	}
 	p.closing = true
 	p.notifyLocked()
-	entries := make([]*warmPoolEntry, 0, len(p.entries))
-	for key, entry := range p.entries {
-		if entry.starting || entry.busy {
-			continue
+	var closeNow []*warmPoolEntry
+	// Every caller may retry a previously quarantined host. Close on the host is
+	// idempotent and can finish after an earlier caller's context expired.
+	for _, entry := range p.entries {
+		if entry.state == warmEntryLeased || entry.state == warmEntryIdle || entry.state == warmEntryQuarantined {
+			entry.state = warmEntryClosing
+			closeNow = append(closeNow, entry)
 		}
-		delete(p.entries, key)
-		entries = append(entries, entry)
 	}
 	p.mu.Unlock()
 
 	var errs []error
-	for _, entry := range entries {
-		if err := p.closeHost(ctx, entry.host); err != nil {
+	for _, entry := range closeNow {
+		if err := p.closeEntry(ctx, entry); err != nil {
 			errs = append(errs, err)
 		}
 	}
-
-	// Active leases close themselves on release after observing p.closing.
 	for {
 		p.mu.Lock()
-		if p.live == 0 {
-			p.notifyLocked()
+		if len(p.entries) == 0 {
 			p.mu.Unlock()
 			return errors.Join(errs...)
+		}
+		if p.allQuarantinedLocked() {
+			p.mu.Unlock()
+			return errors.Join(append(errs, errWarmSessionCleanupUnconfirmed)...)
 		}
 		changed := p.changed
 		p.mu.Unlock()
@@ -324,24 +337,30 @@ func (p *warmSessionPool) close(ctx context.Context) error {
 }
 
 type warmPoolStats struct {
-	Live     int
-	Busy     int
-	Idle     int
-	Starting int
+	Live        int
+	Busy        int
+	Idle        int
+	Starting    int
+	Closing     int
+	Quarantined int
 }
 
 func (p *warmSessionPool) stats() warmPoolStats {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	stats := warmPoolStats{Live: p.live}
+	stats := warmPoolStats{Live: len(p.entries)}
 	for _, entry := range p.entries {
-		switch {
-		case entry.starting:
+		switch entry.state {
+		case warmEntryStarting:
 			stats.Starting++
-		case entry.busy:
+		case warmEntryLeased:
 			stats.Busy++
-		default:
+		case warmEntryIdle:
 			stats.Idle++
+		case warmEntryClosing:
+			stats.Closing++
+		case warmEntryQuarantined:
+			stats.Quarantined++
 		}
 	}
 	return stats

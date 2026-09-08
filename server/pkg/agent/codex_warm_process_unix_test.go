@@ -15,12 +15,19 @@ func codexWarmTestProcessGone(pid int) bool {
 	return err != nil || strings.HasPrefix(strings.ToUpper(strings.TrimSpace(string(out))), "Z")
 }
 
-func TestParseCodexWarmProcessGroupMembersIgnoresZombies(t *testing.T) {
-	members, err := parseCodexWarmProcessGroupMembers([]byte("101 42 S\n102 42 Z\n103 42 Z+\n104 7 R\n"), 42)
+func TestParseCodexWarmOwnedProcessesIncludesDetachedDescendantsAndIgnoresZombies(t *testing.T) {
+	members, err := parseCodexWarmOwnedProcesses([]byte(""+
+		"42 1 42 S\n"+
+		"101 42 42 S\n"+
+		"102 42 102 S\n"+ // setsid/new process group, still a descendant
+		"103 102 103 R\n"+
+		"104 42 42 Z\n"+
+		"105 42 42 Z+\n"+
+		"106 1 7 R\n"), 42)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[int]struct{}{101: {}}
+	want := map[int]struct{}{42: {}, 101: {}, 102: {}, 103: {}}
 	if !reflect.DeepEqual(members, want) {
 		t.Fatalf("members = %#v, want %#v", members, want)
 	}

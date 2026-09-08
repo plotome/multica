@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ type fakeAgentWarmHost struct {
 	closes     atomic.Int32
 	healthy    atomic.Bool
 	prepareErr error
+	closeErr   error
 }
 
 func newFakeAgentWarmHost() *fakeAgentWarmHost {
@@ -37,8 +39,24 @@ func (h *fakeAgentWarmHost) PrepareIdle(context.Context) error {
 }
 func (h *fakeAgentWarmHost) Close(context.Context) error {
 	h.closes.Add(1)
-	h.healthy.Store(false)
-	return nil
+	if h.closeErr == nil {
+		h.healthy.Store(false)
+	}
+	return h.closeErr
+}
+
+func TestPinnedWarmHostRetainsEnvironmentUntilCleanupConfirmed(t *testing.T) {
+	host := newFakeAgentWarmHost()
+	host.closeErr = errors.New("still alive")
+	var unpins atomic.Int32
+	pinned := &pinnedWarmHost{WarmHost: host, onClose: func() { unpins.Add(1) }}
+	if err := pinned.Close(t.Context()); err == nil || unpins.Load() != 0 {
+		t.Fatalf("first close error=%v unpins=%d", err, unpins.Load())
+	}
+	host.closeErr = nil
+	if err := pinned.Close(t.Context()); err != nil || unpins.Load() != 1 {
+		t.Fatalf("confirmed close error=%v unpins=%d", err, unpins.Load())
+	}
 }
 func (h *fakeAgentWarmHost) Execute(context.Context, string, agent.ExecOptions) (*agent.Session, error) {
 	n := h.executes.Add(1)
@@ -57,7 +75,7 @@ func TestPooledCodexBackendReusesHealthyHost(t *testing.T) {
 	backend := &pooledCodexBackend{
 		pool: pool, key: "conversation", fingerprint: "config",
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		factory: func(context.Context) (warmSessionHost, error) {
+		factory: func(context.Context) (agent.WarmHost, error) {
 			creates.Add(1)
 			return host, nil
 		},
@@ -94,7 +112,7 @@ func TestPooledCodexBackendDiscardsHostWhenIdlePreparationFails(t *testing.T) {
 	backend := &pooledCodexBackend{
 		pool: pool, key: "conversation", fingerprint: "config",
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		factory: func(context.Context) (warmSessionHost, error) {
+		factory: func(context.Context) (agent.WarmHost, error) {
 			if creates.Add(1) == 1 {
 				return first, nil
 			}
@@ -120,13 +138,88 @@ func TestPooledCodexBackendDiscardsHostWhenIdlePreparationFails(t *testing.T) {
 	}
 }
 
+func TestPooledCodexBackendFailsClosedWhenCleanupIsUnconfirmed(t *testing.T) {
+	pool := newWarmSessionPool(1, time.Hour)
+	host := newFakeAgentWarmHost()
+	host.prepareErr = errors.New("turn child still alive")
+	host.closeErr = errors.New("host tree still alive")
+	fallback := newFakeAgentWarmHost()
+	backend := &pooledCodexBackend{
+		pool: pool, key: "conversation", fingerprint: "config", fallback: fallback,
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		factory: func(context.Context) (agent.WarmHost, error) { return host, nil },
+	}
+
+	session, err := backend.Execute(t.Context(), "prompt", agent.ExecOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range session.Messages {
+	}
+	result := <-session.Result
+	if result.Status != "failed" || !strings.Contains(result.Error, errWarmSessionCleanupUnconfirmed.Error()) {
+		t.Fatalf("result = %#v, want failed cleanup confirmation", result)
+	}
+	if stats := pool.stats(); stats.Live != 1 || stats.Quarantined != 1 {
+		t.Fatalf("pool stats = %#v, want retained quarantine", stats)
+	}
+	if _, err := backend.Execute(t.Context(), "next", agent.ExecOptions{}); !errors.Is(err, errWarmSessionCleanupUnconfirmed) {
+		t.Fatalf("next execute error = %v, want cleanup-unconfirmed", err)
+	}
+	if fallback.executes.Load() != 0 {
+		t.Fatal("cold fallback must not race an unconfirmed warm process")
+	}
+}
+
+func TestPooledCodexBackendRebuildsHostThatExitedWhileIdle(t *testing.T) {
+	pool := newWarmSessionPool(1, time.Hour)
+	first := newFakeAgentWarmHost()
+	second := newFakeAgentWarmHost()
+	var creates atomic.Int32
+	backend := &pooledCodexBackend{
+		pool: pool, key: "conversation", fingerprint: "config",
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		factory: func(context.Context) (agent.WarmHost, error) {
+			if creates.Add(1) == 1 {
+				return first, nil
+			}
+			return second, nil
+		},
+	}
+
+	for range mustExecuteWarmBackend(t, backend).Messages {
+	}
+	first.healthy.Store(false)
+	session := mustExecuteWarmBackend(t, backend)
+	for range session.Messages {
+	}
+	if result := <-session.Result; result.Status != "completed" {
+		t.Fatalf("replacement result = %#v", result)
+	}
+	if creates.Load() != 2 || first.closes.Load() != 1 || second.executes.Load() != 1 {
+		t.Fatalf("creates=%d first closes=%d second executes=%d", creates.Load(), first.closes.Load(), second.executes.Load())
+	}
+	if err := pool.close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustExecuteWarmBackend(t *testing.T, backend *pooledCodexBackend) *agent.Session {
+	t.Helper()
+	session, err := backend.Execute(t.Context(), "prompt", agent.ExecOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return session
+}
+
 func TestPooledCodexBackendFallsBackWhenWarmStartupFails(t *testing.T) {
 	pool := newWarmSessionPool(10, time.Hour)
 	fallback := newFakeAgentWarmHost()
 	backend := &pooledCodexBackend{
 		pool: pool, key: "conversation", fingerprint: "config", fallback: fallback,
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		factory: func(context.Context) (warmSessionHost, error) {
+		factory: func(context.Context) (agent.WarmHost, error) {
 			return nil, errors.New("warm unavailable")
 		},
 	}
@@ -164,6 +257,7 @@ echo '{"jsonrpc":"2.0","id":3,"result":{}}'
 echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr-retry","turn":{"id":"turn-retry"}}}'
 if [ "$second" = true ]; then
   echo '{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-retry","turnId":"turn-retry","item":{"type":"agentMessage","id":"msg-retry","phase":"final_answer","text":"recovered"}}}'
+  echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr-retry","turn":{"id":"turn-retry","status":"completed"}}}'
 else
   echo 'failed to refresh available models: timeout waiting for child process to exit' >&2
   read interrupt
@@ -179,7 +273,7 @@ while read rest; do :; done
 	pool := newWarmSessionPool(1, time.Hour)
 	backend := &pooledCodexBackend{
 		pool: pool, key: "conversation", fingerprint: "config", logger: cfg.Logger,
-		factory: func(ctx context.Context) (warmSessionHost, error) {
+		factory: func(ctx context.Context) (agent.WarmHost, error) {
 			return agent.NewWarmHost(ctx, "codex", cfg, opts)
 		},
 	}
@@ -217,8 +311,17 @@ func TestCodexWarmEligibilityFailsClosedForTaskScopedMCP(t *testing.T) {
 	if codexWarmEligible(Task{IssueID: "issue"}, agent.ExecOptions{}, env, true) {
 		t.Fatal("custom runtime profile must bypass warm hosting")
 	}
-	if codexWarmEligible(task, agent.ExecOptions{CustomArgs: []string{"-c", "mcp_servers.demo.command='demo'"}}, env, false) {
-		t.Fatal("custom-arg MCP must bypass warm hosting")
+	for _, args := range [][]string{
+		{"-c", "mcp_servers.demo.command='demo'"},
+		{"-c", `mcp_servers={probe={command="probe"}}`},
+		{"--config=mcp_servers = { probe = { command = \"probe\" } }"},
+	} {
+		if codexWarmEligible(task, agent.ExecOptions{CustomArgs: args}, env, false) {
+			t.Fatalf("custom-arg MCP %q must bypass warm hosting", args)
+		}
+	}
+	if !codexWarmEligible(task, agent.ExecOptions{CustomArgs: []string{"-c", `model="gpt-5"`}}, env, false) {
+		t.Fatal("unrelated Codex config override should remain warm eligible")
 	}
 	codexHome := t.TempDir()
 	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("[mcp_servers.demo]\ncommand = 'demo'\n"), 0o600); err != nil {

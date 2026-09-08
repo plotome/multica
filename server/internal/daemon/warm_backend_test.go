@@ -202,7 +202,7 @@ while read rest; do :; done
 
 func TestCodexWarmEligibilityFailsClosedForTaskScopedMCP(t *testing.T) {
 	task := Task{IssueID: "issue", WorkspaceID: "workspace", RuntimeID: "runtime", AgentID: "agent"}
-	env := &execenv.Environment{RootDir: "/root", WorkDir: "/root/workdir", CodexHome: "/root/codex-home"}
+	env := &execenv.Environment{RootDir: "/root", WorkDir: "/root/workdir", CodexHome: t.TempDir()}
 	if !codexWarmEligible(task, agent.ExecOptions{}, env, false) {
 		t.Fatal("plain built-in Codex task should be warm eligible")
 	}

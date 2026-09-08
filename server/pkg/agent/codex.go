@@ -1801,11 +1801,17 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		// developerInstructions stays nil for the reason given on thread/start
 		// below.
 		resumeParams := map[string]any{
-			"threadId":              priorThreadID,
+			"threadId": priorThreadID,
+			// The app-server already reconstructs the thread internally. Returning
+			// every historical turn in this RPC is deprecated for paginated
+			// threads, wastes transport work, and can overflow the line scanner on
+			// long conversations. Callers need only the thread metadata/id here.
+			"excludeTurns":          true,
 			"cwd":                   opts.Cwd,
 			"model":                 nilIfEmpty(opts.Model),
 			"developerInstructions": nil,
 		}
+		applyCodexShellEnvironment(resumeParams, opts.CodexShellEnv)
 		// Explicit override of the persisted reasoning effort: without
 		// this, a Codex resume silently reuses whatever level the prior
 		// session was created with, even when the user has flipped the
@@ -1849,6 +1855,7 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": true,
 	}
+	applyCodexShellEnvironment(startParams, opts.CodexShellEnv)
 	applyCodexReasoningEffort(startParams, opts.ThinkingLevel)
 	applyCodexServiceTier(startParams, opts.ServiceTier)
 	c.threadStartSent = true
@@ -1883,6 +1890,27 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 	)
 	c.trySetThreadName(ctx, threadID, opts.ThreadName, logger)
 	return threadID, false, nil
+}
+
+// applyCodexShellEnvironment makes each thread load the current task's exact
+// shell environment. This is redundant but harmless for cold app-server
+// launches and essential for warm ones: MULTICA_TOKEN, MULTICA_TASK_ID and the
+// task temp directory change while the provider process remains alive.
+func applyCodexShellEnvironment(params map[string]any, values map[string]string) {
+	if len(values) == 0 {
+		return
+	}
+	set := make(map[string]any, len(values))
+	for key, value := range values {
+		set[key] = value
+	}
+	params["config"] = map[string]any{
+		"shell_environment_policy": map[string]any{
+			"inherit":                 "none",
+			"ignore_default_excludes": true,
+			"set":                     set,
+		},
+	}
 }
 
 func (c *codexClient) trySetThreadName(ctx context.Context, threadID, name string, logger *slog.Logger) {

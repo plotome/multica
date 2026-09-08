@@ -3,14 +3,16 @@
 package agent
 
 import (
-	"errors"
+	"os/exec"
 	"reflect"
-	"syscall"
+	"strconv"
+	"strings"
 	"testing"
 )
 
 func codexWarmTestProcessGone(pid int) bool {
-	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	return err != nil || strings.HasPrefix(strings.ToUpper(strings.TrimSpace(string(out))), "Z")
 }
 
 func TestParseCodexWarmProcessGroupMembersIgnoresZombies(t *testing.T) {

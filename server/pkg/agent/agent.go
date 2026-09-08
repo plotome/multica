@@ -22,22 +22,6 @@ type Backend interface {
 	Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error)
 }
 
-// WarmHost is a long-lived provider transport which can execute sequential
-// turns without restarting the provider process. Callers must serialize
-// Execute calls and must Close hosts which stop reporting Healthy.
-//
-// Backend remains the universal contract: warm hosting is deliberately an
-// opt-in capability so providers whose CLI is intrinsically one-shot keep
-// their existing lifecycle unchanged.
-type WarmHost interface {
-	Backend
-	Healthy() bool
-	// PrepareIdle removes turn-owned background work and confirms that only
-	// the host's baseline process tree remains before credentials may rotate.
-	PrepareIdle(context.Context) error
-	Close(context.Context) error
-}
-
 // ExecOptions configures a single execution.
 type ExecOptions struct {
 	Cwd   string
@@ -140,11 +124,6 @@ type ExecOptions struct {
 	// through Claude Code's --settings flag. It currently carries restrictive
 	// runtime-skill overrides only; other providers ignore it.
 	ClaudeSettingsPath string
-	// CodexShellEnv is the exact environment exposed to shell tools for this
-	// turn. A warm app-server keeps its own process environment from the first
-	// task, so thread/start and thread/resume must carry current values rather
-	// than inheriting stale task credentials. Other providers ignore it.
-	CodexShellEnv map[string]string
 }
 
 // runContext derives the execution context for an agent subprocess from the
@@ -272,17 +251,6 @@ type Result struct {
 	// its model catalog, and that the process tree was reaped afterwards.
 	// Like codexInitializeRetrySafe it is not part of the public contract.
 	codexStartupRefreshRetrySafe bool
-	// codexWarmStartupRetryCandidate is the warm-host half of the same model
-	// catalog failure signal. The daemon still has to close/reap the poisoned
-	// host before replaying, so this is a candidate rather than proof by itself.
-	codexWarmStartupRetryCandidate bool
-}
-
-// CodexWarmStartupRetryCandidate reports that a warm Codex turn made no
-// progress because its model catalog failed to refresh. Callers may replay the
-// prompt once only after closing the host successfully.
-func CodexWarmStartupRetryCandidate(result Result) bool {
-	return result.codexWarmStartupRetryCandidate
 }
 
 // Config configures a Backend instance.
@@ -474,23 +442,6 @@ func New(agentType string, cfg Config) (Backend, error) {
 		return &zeroclawBackend{cfg: cfg}, nil
 	default:
 		return nil, fmt.Errorf("unknown agent type: %q (supported: %s)", agentType, strings.Join(SupportedTypes, ", "))
-	}
-}
-
-// NewWarmHost starts a reusable provider transport. Warm hosting is
-// intentionally explicit and currently implemented only by Codex; callers
-// should fall back to New/ResolveBackend when this returns an unsupported
-// provider error.
-func NewWarmHost(ctx context.Context, agentType string, cfg Config, opts ExecOptions) (WarmHost, error) {
-	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
-	}
-	cfg.LaunchPrefix = filterLaunchPrefix(cfg.LaunchPrefix, agentType, cfg.Logger)
-	switch agentType {
-	case "codex":
-		return newCodexWarmHost(ctx, cfg, opts)
-	default:
-		return nil, fmt.Errorf("warm host unsupported for agent type %q", agentType)
 	}
 }
 

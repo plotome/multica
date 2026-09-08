@@ -454,35 +454,6 @@ func hasManagedCodexMcpConfig(raw json.RawMessage) bool {
 // `$CODEX_HOME/config.toml`.
 var codexManagedMcpConfigKeyRe = regexp.MustCompile(`^\s*mcp_servers(?:\s*\.|\s*=|\s*$)`)
 
-// CodexArgsConfigureMCP reports whether Codex launch arguments configure the
-// mcp_servers namespace through -c/--config. Daemon warm-host eligibility uses
-// the same parser as managed-config filtering so inline tables and spaced keys
-// cannot drift into a weaker, duplicated check.
-func CodexArgsConfigureMCP(args []string) bool {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		flag := arg
-		value := ""
-		hasInlineValue := false
-		if idx := strings.Index(arg, "="); idx > 0 {
-			flag = arg[:idx]
-			value = arg[idx+1:]
-			hasInlineValue = true
-		}
-		if flag != "-c" && flag != "--config" {
-			continue
-		}
-		if !hasInlineValue && i+1 < len(args) {
-			value = args[i+1]
-			i++
-		}
-		if codexManagedMcpConfigKeyRe.MatchString(value) {
-			return true
-		}
-	}
-	return false
-}
-
 var codexManagedFastModeConfigKeyRe = regexp.MustCompile(
 	`^\s*features\s*\.\s*fast_mode\s*(?:=|$)`)
 
@@ -1534,7 +1505,7 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 			}
 			return
 		}
-		c.setThreadID(threadID)
+		c.threadID = threadID
 		if resumed {
 			b.cfg.Logger.Info("codex thread resumed", "thread_id", threadID)
 		} else {
@@ -1671,13 +1642,13 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 					Timeout:      firstTurnNoProgressTimeout,
 					LastActivity: lastSemanticActivityDescription,
 					ThreadID:     threadID,
-					TurnID:       c.turnIDValue(),
+					TurnID:       c.turnID,
 					Model:        opts.Model,
 				}
 				b.cfg.Logger.Warn(CodexFirstTurnNoProgressMarker,
 					"pid", cmd.Process.Pid,
 					"thread_id", threadID,
-					"turn_id", c.turnIDValue(),
+					"turn_id", c.turnID,
 					"timeout", firstTurnNoProgressTimeout.String(),
 					"last_activity", lastSemanticActivityDescription,
 				)
@@ -1690,13 +1661,13 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 					Timeout:      semanticInactivityTimeout,
 					LastActivity: lastSemanticActivityDescription,
 					ThreadID:     threadID,
-					TurnID:       c.turnIDValue(),
+					TurnID:       c.turnID,
 					Model:        opts.Model,
 				}
 				b.cfg.Logger.Warn(CodexSemanticInactivityMarker,
 					"pid", cmd.Process.Pid,
 					"thread_id", threadID,
-					"turn_id", c.turnIDValue(),
+					"turn_id", c.turnID,
 					"timeout", semanticInactivityTimeout.String(),
 					"last_activity", lastSemanticActivityDescription,
 					"idle_for", time.Since(lastSemanticActivity).Round(time.Millisecond).String(),
@@ -1783,7 +1754,7 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 				"active_launches", activeLaunches,
 				"method", "turn/start",
 				"thread_id", threadID,
-				"turn_id", c.turnIDValue(),
+				"turn_id", c.turnID,
 				"outcome", outcome,
 				"latency", waitLatency.Round(time.Millisecond).String(),
 				"latency_ms", waitLatency.Milliseconds(),
@@ -1914,16 +1885,13 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		// below.
 		resumeParams := map[string]any{
 			"threadId": priorThreadID,
-			// The app-server already reconstructs the thread internally. Returning
-			// every historical turn in this RPC is deprecated for paginated
-			// threads, wastes transport work, and can overflow the line scanner on
-			// long conversations. Callers need only the thread metadata/id here.
+			// Only omit history from the RPC response; Codex still restores it
+			// internally. This bounds transport work for long conversations.
 			"excludeTurns":          true,
 			"cwd":                   opts.Cwd,
 			"model":                 nilIfEmpty(opts.Model),
 			"developerInstructions": nil,
 		}
-		applyCodexShellEnvironment(resumeParams, opts.CodexShellEnv)
 		// Explicit override of the persisted reasoning effort: without
 		// this, a Codex resume silently reuses whatever level the prior
 		// session was created with, even when the user has flipped the
@@ -1989,7 +1957,6 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": true,
 	}
-	applyCodexShellEnvironment(startParams, opts.CodexShellEnv)
 	applyCodexReasoningEffort(startParams, opts.ThinkingLevel)
 	applyCodexServiceTier(startParams, opts.ServiceTier)
 	c.threadSetupMethod = "thread/start"
@@ -2024,27 +1991,6 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 	)
 	c.trySetThreadName(ctx, threadID, opts.ThreadName, logger)
 	return threadID, false, nil
-}
-
-// applyCodexShellEnvironment makes each thread load the current task's exact
-// shell environment. This is redundant but harmless for cold app-server
-// launches and essential for warm ones: MULTICA_TOKEN, MULTICA_TASK_ID and the
-// task temp directory change while the provider process remains alive.
-func applyCodexShellEnvironment(params map[string]any, values map[string]string) {
-	if len(values) == 0 {
-		return
-	}
-	set := make(map[string]any, len(values))
-	for key, value := range values {
-		set[key] = value
-	}
-	params["config"] = map[string]any{
-		"shell_environment_policy": map[string]any{
-			"inherit":                 "none",
-			"ignore_default_excludes": true,
-			"set":                     set,
-		},
-	}
 }
 
 func (c *codexClient) trySetThreadName(ctx context.Context, threadID, name string, logger *slog.Logger) {
@@ -2310,7 +2256,6 @@ type codexClient struct {
 	pid                    int
 	attempt                int
 	activeLaunches         int64
-	turnStateMu            sync.Mutex
 	threadSetupMethod      string
 	threadSetupStarted     time.Time
 	threadID               string
@@ -2356,10 +2301,9 @@ type codexClient struct {
 // Its mutable lifecycle fields are only touched by the stdout reader goroutine;
 // armed is atomic because the lifecycle goroutine flips it.
 type codexTurnNotificationGate struct {
-	armed          atomic.Bool
-	started        bool
-	turnID         string
-	requireStarted bool
+	armed   atomic.Bool
+	started bool
+	turnID  string
 }
 
 func (g *codexTurnNotificationGate) arm() {
@@ -2379,9 +2323,8 @@ func (g *codexTurnNotificationGate) accept(method string, params map[string]any)
 			return true
 		}
 		// Older Codex event streams can omit task_started. Once turn/start is
-		// armed, cold execution keeps that compatibility. Warm execution needs
-		// the explicit boundary so a late task_complete cannot end the next turn.
-		return !g.requireStarted || g.started
+		// armed, keep that compatibility; pre-arm replay is still excluded.
+		return true
 	}
 
 	switch {
@@ -2394,13 +2337,13 @@ func (g *codexTurnNotificationGate) accept(method string, params map[string]any)
 			// Older app-server versions can complete a turn without first
 			// emitting turn/started. The pre-arm boundary still rejects resume
 			// replay, while this keeps those versions functional.
-			return !g.requireStarted
+			return true
 		}
 		turnID := extractNestedString(params, "turn", "id")
 		return g.turnID == "" || turnID == "" || turnID == g.turnID
 	case method == "thread/status/changed" || strings.HasPrefix(method, "item/"):
 		if !g.started {
-			return !g.requireStarted
+			return true
 		}
 		turnID, _ := params["turnId"].(string)
 		return g.turnID == "" || turnID == "" || turnID == g.turnID
@@ -2409,41 +2352,6 @@ func (g *codexTurnNotificationGate) accept(method string, params map[string]any)
 		// turn/start, so it must remain observable even without turn/started.
 		return true
 	}
-}
-
-func (c *codexClient) resetTurnState(taskID string) {
-	c.turnStateMu.Lock()
-	c.cfg.TaskID = taskID
-	c.threadID, c.turnID = "", ""
-	c.notificationProtocol = "unknown"
-	c.turnCompleted = false
-	c.threadSetupMethod = ""
-	c.threadSetupStarted = time.Time{}
-	c.turnStateMu.Unlock()
-
-	c.turnErrorMu.Lock()
-	c.turnError = ""
-	c.turnErrorMu.Unlock()
-	c.usageMu.Lock()
-	c.usage = TokenUsage{}
-	c.usageMu.Unlock()
-}
-
-func (c *codexClient) setThreadID(threadID string) {
-	c.turnStateMu.Lock()
-	c.threadID = threadID
-	c.turnStateMu.Unlock()
-}
-
-func (c *codexClient) turnIDs() (string, string) {
-	c.turnStateMu.Lock()
-	defer c.turnStateMu.Unlock()
-	return c.threadID, c.turnID
-}
-
-func (c *codexClient) turnIDValue() string {
-	_, turnID := c.turnIDs()
-	return turnID
 }
 
 func (c *codexClient) setTurnError(msg string) {
@@ -2833,8 +2741,6 @@ func codexPermissionsApprovalResponse(params json.RawMessage, logger *slog.Logge
 }
 
 func (c *codexClient) handleNotification(raw map[string]json.RawMessage) {
-	c.turnStateMu.Lock()
-	defer c.turnStateMu.Unlock()
 	var method string
 	_ = json.Unmarshal(raw["method"], &method)
 

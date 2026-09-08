@@ -179,15 +179,33 @@ type Config struct {
 	LeaseMetrics LeaseMetrics
 }
 
+// The defaults are named and exported because they are not private taste:
+// other packages are sized against them. The WeCom cross-replica dispatcher
+// re-offers a frame until a lease has finished moving, which takes one
+// DefaultPollInterval, and drains inside a shutdown bounded by
+// DefaultShutdownTimeout. A copy of either number over there would be a second
+// definition free to drift from this one.
+const (
+	// DefaultLeaseTTL is how long a lease grant stays valid unrenewed.
+	DefaultLeaseTTL = 180 * time.Second
+	// DefaultPollInterval is how often a Supervisor scans for installations it
+	// should be holding, and therefore how long a lease takes to move to
+	// another replica.
+	DefaultPollInterval = 30 * time.Second
+	// DefaultShutdownTimeout bounds how long Wait blocks joining the
+	// per-installation goroutines.
+	DefaultShutdownTimeout = 15 * time.Second
+)
+
 func (c Config) withDefaults() Config {
 	if c.LeaseTTL == 0 {
-		c.LeaseTTL = 180 * time.Second
+		c.LeaseTTL = DefaultLeaseTTL
 	}
 	if c.LeaseRenewInterval == 0 {
 		c.LeaseRenewInterval = min(60*time.Second, c.LeaseTTL/3)
 	}
 	if c.PollInterval == 0 {
-		c.PollInterval = min(30*time.Second, c.LeaseRenewInterval/2)
+		c.PollInterval = min(DefaultPollInterval, c.LeaseRenewInterval/2)
 	}
 	if c.LeaseErrorRetryInterval == 0 {
 		c.LeaseErrorRetryInterval = min(5*time.Second, c.LeaseRenewInterval/4)
@@ -214,7 +232,7 @@ func (c Config) withDefaults() Config {
 		c.RotationWaitTimeout = c.DisconnectTimeout + c.LeaseReleaseTimeout
 	}
 	if c.ShutdownTimeout == 0 {
-		c.ShutdownTimeout = 15 * time.Second
+		c.ShutdownTimeout = DefaultShutdownTimeout
 	}
 	if c.Now == nil {
 		c.Now = time.Now
@@ -589,7 +607,14 @@ func (s *Supervisor) startSupervisor(parent context.Context, inst Installation) 
 	}
 	s.wg.Add(1)
 	s.mu.Unlock()
-	go s.supervise(ctx, inst, id, gen, done)
+	go func() {
+		defer s.wg.Done()
+		// A supervisor can exit without an explicit cancellation when lease
+		// acquisition is contended or fails. Always detach its child context
+		// from Run's long-lived parent when the goroutine returns.
+		defer cancel()
+		s.supervise(ctx, inst, id, gen, done)
+	}()
 }
 
 // leaseToken composes the per-supervisor lease token: the process-wide
@@ -598,6 +623,14 @@ func (s *Supervisor) startSupervisor(parent context.Context, inst Installation) 
 // same installation (the rotation path) carry different tokens. That
 // distinction stops an old supervisor's post-cancel release from
 // CAS-matching and deleting the successor's just-acquired lease.
+//
+// The result is an internal CAS marker, NOT a credential: it is never sent
+// to any platform and on its own grants nothing (only a direct Redis / DB
+// writer could act on it). It is still kept out of log FIELDS — GH #7132
+// reported a plaintext `lease_token=` field as a leaked channel credential,
+// and disproving that costs a full investigation every time someone reads
+// the log. supervise() logs node_id + lease_gen instead, which carries the
+// same diagnostic information under a name that does not read as a secret.
 func leaseToken(nodeID string, gen uint64) string {
 	return nodeID + "-g" + strconv.FormatUint(gen, 10)
 }
@@ -607,7 +640,6 @@ func leaseToken(nodeID string, gen uint64) string {
 // while it runs → on exit, release + back off → repeat. Returns when ctx is
 // cancelled.
 func (s *Supervisor) supervise(ctx context.Context, inst Installation, id string, gen uint64, done chan<- struct{}) {
-	defer s.wg.Done()
 	defer close(done)
 	defer func() {
 		// Only clear the map entry if it still belongs to us — gen
@@ -625,7 +657,7 @@ func (s *Supervisor) supervise(ctx context.Context, inst Installation, id string
 		"installation_id", id,
 		"channel_type", string(inst.ChannelType),
 		"node_id", s.nodeID,
-		"lease_token", leaseTok,
+		"lease_gen", gen,
 	)
 	backoff := s.cfg.MinBackoff
 

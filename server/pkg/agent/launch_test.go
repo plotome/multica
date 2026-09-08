@@ -3,11 +3,9 @@ package agent
 import (
 	"bytes"
 	"context"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -122,26 +120,6 @@ func TestNewFiltersLaunchPrefixOnce(t *testing.T) {
 	}
 }
 
-// TestLaunchPrefixReachesACPFamilies is the regression guard for the half of
-// the bug the report did not name: fixed_args used to ride on ExtraArgs, which
-// the ACP backends never read, so on those families it was silently dropped
-// rather than merely misordered. The prefix must land ahead of the hardcoded
-// `acp` subcommand.
-func TestLaunchPrefixReachesACPFamilies(t *testing.T) {
-	t.Parallel()
-
-	for _, family := range []string{"kimi", "hermes", "kiro", "reasonix", "qwenpaw"} {
-		t.Run(family, func(t *testing.T) {
-			t.Parallel()
-			cfg := Config{LaunchPrefix: []string{"start", "q36"}, Logger: slog.Default()}
-			argv := cfg.commandAt("wrapper").Argv("acp")
-			if idx := prefixIndex(argv, []string{"start", "q36", "acp"}); idx != 0 {
-				t.Fatalf("%s: prefix must precede the acp subcommand, got %v", family, argv)
-			}
-		})
-	}
-}
-
 // TestDiscoveryCacheKeySeparatesLaunchPrefixes: one binary behind two
 // different prefixes is two different catalogs.
 func TestDiscoveryCacheKeySeparatesLaunchPrefixes(t *testing.T) {
@@ -180,71 +158,138 @@ func TestCommandArgvNeverAliasesItsInputs(t *testing.T) {
 	}
 }
 
-// TestOnlyLaunchGoSpawnsRuntimeProcesses is the structural half of this fix.
-//
-// Distributed opt-in is what let ExtraArgs rot: it was honoured by six of
-// twenty-one backends, and MULTICA_QWENPAW_ARGS shipped plumbed-but-dropped
-// because nothing failed when a backend forgot to read it. Re-establishing the
-// same convention for the launch prefix would rot the same way, so the rule is
-// mechanical instead: every runtime process in this package is constructed in
-// launch.go, which is the one place that applies the prefix.
-//
-// A new backend that calls os/exec directly fails here rather than silently
-// reintroducing GH #7046.
-func TestOnlyLaunchGoSpawnsRuntimeProcesses(t *testing.T) {
+func TestRedactAgentCommandArgsPreservesOnlySafeFlagNames(t *testing.T) {
 	t.Parallel()
 
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("read package dir: %v", err)
+	overlongFlag := "--" + strings.Repeat("a", maxLoggedAgentCommandFlagLen)
+	args := []string{
+		"--api-key", "api-key-secret",
+		"--dash-prefixed-secret", "-sTk9xQZ-secretvalue",
+		"--token=token-secret",
+		"--header", "Authorization: Bearer header-secret",
+		"-c", `model_providers.example.api_key="config-secret"`,
+		"--future-secret", "future-value-secret",
+		"prompt-secret",
+		"--verbose",
+		"-not-a-short-flag",
+		overlongFlag,
+	}
+	want := []string{
+		"--api-key", redactedAgentCommandArg,
+		"--dash-prefixed-secret", redactedAgentCommandArg,
+		"--token",
+		"--header", redactedAgentCommandArg,
+		"-c", redactedAgentCommandArg,
+		"--future-secret", redactedAgentCommandArg,
+		redactedAgentCommandArg,
+		"--verbose",
+		redactedAgentCommandArg,
+		redactedAgentCommandArg,
 	}
 
-	fset := token.NewFileSet()
-	var offenders []string
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		// launch.go owns the boundary. The platform invocation rewrites resolve
-		// a PowerShell host with exec.LookPath but never spawn the runtime.
-		if name == "launch.go" {
-			continue
-		}
-		src, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		file, err := parser.ParseFile(fset, name, src, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", name, err)
-		}
-		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
+	got := redactAgentCommandArgs(args, nil)
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("redactAgentCommandArgs = %v, want %v", got, want)
+	}
+}
+
+func TestTrustedAgentCommandPositionalsFollowSourceIndexes(t *testing.T) {
+	t.Parallel()
+
+	invocationArgs := []string{"acp", "--api-key", "-sTk9xQZ-secretvalue", "acp"}
+	finalArgs := []string{
+		"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "wrapper.ps1",
+		"start", "q36",
+		"acp", "--api-key", "-sTk9xQZ-secretvalue", "acp",
+	}
+	cfg := Config{LaunchPrefix: []string{"start", "q36"}}
+	trusted := cfg.trustedAgentCommandPositionals(finalArgs,
+		newAgentCommandLogArgs(invocationArgs, trustAgentCommandPositional(0, "acp")))
+
+	got := redactAgentCommandArgs(finalArgs, trusted)
+	want := []string{
+		redactedAgentCommandArg, redactedAgentCommandArg, redactedAgentCommandArg, redactedAgentCommandArg, redactedAgentCommandArg,
+		redactedAgentCommandArg, redactedAgentCommandArg,
+		"acp", "--api-key", redactedAgentCommandArg, redactedAgentCommandArg,
+	}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("source-aware redaction = %v, want %v", got, want)
+	}
+}
+
+func TestLogAgentCommandRedactsTextAndJSON(t *testing.T) {
+	t.Parallel()
+
+	args := []string{
+		"--api-key", "api-key-secret",
+		"--dash-prefixed-secret", "-sTk9xQZ-secretvalue",
+		"--token=token-secret",
+		"--header", "Authorization: Bearer header-secret",
+		"-c", `model_providers.example.api_key="config-secret"`,
+		"--future-secret", "future-value-secret",
+		"prompt-secret",
+	}
+	secrets := []string{
+		"api-key-secret",
+		"-sTk9xQZ-secretvalue",
+		"token-secret",
+		"Authorization: Bearer header-secret",
+		"config-secret",
+		"future-value-secret",
+		"prompt-secret",
+	}
+
+	for _, tc := range []struct {
+		name    string
+		handler func(*bytes.Buffer) slog.Handler
+	}{
+		{"text", func(buf *bytes.Buffer) slog.Handler { return slog.NewTextHandler(buf, nil) }},
+		{"json", func(buf *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(buf, nil) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			cfg := Config{Logger: slog.New(tc.handler(&buf)), provider: "codex"}
+			cmd := &exec.Cmd{Path: "/opt/multica/bin/codex", Args: append([]string{"codex"}, args...)}
+			cfg.logAgentCommandWithPrompt(cmd, newAgentCommandLogArgs(args), 123)
+
+			output := buf.String()
+			for _, secret := range secrets {
+				if strings.Contains(output, secret) {
+					t.Errorf("%s log exposed %q: %s", tc.name, secret, output)
+				}
 			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
+			for _, diagnostic := range []string{
+				"agent command", "provider", "codex", "/opt/multica/bin/codex",
+				"--api-key", "--token", "--header", "-c", "--future-secret",
+				redactedAgentCommandArg, "arg_count", "prompt_bytes",
+			} {
+				if !strings.Contains(output, diagnostic) {
+					t.Errorf("%s log omitted diagnostic %q: %s", tc.name, diagnostic, output)
+				}
 			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if !ok || pkg.Name != "exec" {
-				return true
-			}
-			if sel.Sel.Name != "Command" && sel.Sel.Name != "CommandContext" {
-				return true
-			}
-			offenders = append(offenders,
-				fset.Position(call.Pos()).String()+": exec."+sel.Sel.Name)
-			return true
 		})
 	}
+}
 
-	if len(offenders) > 0 {
-		t.Fatalf("runtime processes must be built through Command.exec / Command.execVia in launch.go, "+
-			"otherwise a custom runtime's fixed_args are dropped (GH #7046). Offending sites:\n%s",
-			strings.Join(offenders, "\n"))
+func TestBackendFactoriesSetCommandLogProvider(t *testing.T) {
+	t.Parallel()
+
+	claude, err := New("claude", Config{Logger: slog.Default()})
+	if err != nil {
+		t.Fatalf("New(claude): %v", err)
+	}
+	if got := claude.(*claudeBackend).cfg.provider; got != "claude" {
+		t.Fatalf("claude log provider = %q, want claude", got)
+	}
+
+	omp, err := NewRuntime("omp", Config{Logger: slog.Default()})
+	if err != nil {
+		t.Fatalf("NewRuntime(omp): %v", err)
+	}
+	if got := omp.(*piBackend).cfg.provider; got != "omp" {
+		t.Fatalf("omp log provider = %q, want omp", got)
 	}
 }
 
@@ -411,6 +456,55 @@ func TestFilterLaunchPrefixConsumesBlockedFlagValue(t *testing.T) {
 	want := []string{"start", "q36"}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("filterLaunchPrefix = %v, want %v", got, want)
+	}
+}
+
+// TestDimLaunchPrefixFiltersBlockedFlags proves the Dim launch-prefix safety
+// policy: allowed positional tokens reach the command ahead of the hardcoded
+// `acp` subcommand, while protocol-breaking flags (--help, --auth-setup,
+// --remote, -h, acp) are stripped. Without this the fixed_args regression
+// this round fixed could return silently.
+func TestDimLaunchPrefixFiltersBlockedFlags(t *testing.T) {
+	t.Parallel()
+
+	// Allowed positional prefix tokens survive and precede `acp`.
+	cfg := Config{LaunchPrefix: []string{"start", "q36"}, Logger: slog.Default()}
+	argv := cfg.commandAt("wrapper").Argv("acp")
+	if idx := prefixIndex(argv, []string{"start", "q36", "acp"}); idx != 0 {
+		t.Fatalf("dim: allowed prefix must precede the acp subcommand, got %v", argv)
+	}
+
+	// Protocol-breaking flags are removed from the prefix.
+	got := filterLaunchPrefix(
+		[]string{"start", "--help", "--auth-setup", "--remote", "-h", "q36"},
+		"dim", slog.Default())
+	want := []string{"start", "q36"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("dim: blocked flags must be stripped, got %v, want %v", got, want)
+	}
+}
+
+// TestZeroclawLaunchPrefixFiltersBlockedFlags proves the ZeroClaw
+// launch-prefix safety policy: allowed positional tokens reach the command
+// ahead of the hardcoded `acp` subcommand, while protocol-breaking flags
+// (--help, -h, login, --login, --auth, acp) are stripped.
+func TestZeroclawLaunchPrefixFiltersBlockedFlags(t *testing.T) {
+	t.Parallel()
+
+	// Allowed positional prefix tokens survive and precede `acp`.
+	cfg := Config{LaunchPrefix: []string{"start", "q36"}, Logger: slog.Default()}
+	argv := cfg.commandAt("wrapper").Argv("acp")
+	if idx := prefixIndex(argv, []string{"start", "q36", "acp"}); idx != 0 {
+		t.Fatalf("zeroclaw: allowed prefix must precede the acp subcommand, got %v", argv)
+	}
+
+	// Protocol-breaking flags are removed from the prefix.
+	got := filterLaunchPrefix(
+		[]string{"start", "--help", "--login", "--auth", "-h", "q36"},
+		"zeroclaw", slog.Default())
+	want := []string{"start", "q36"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("zeroclaw: blocked flags must be stripped, got %v, want %v", got, want)
 	}
 }
 

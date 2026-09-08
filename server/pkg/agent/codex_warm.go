@@ -215,19 +215,17 @@ func newCodexWarmHostOnce(startupCtx context.Context, cfg Config, opts ExecOptio
 		cfg: cfg, cmd: cmd, stdin: stdin, cancel: cancel,
 		readerDone: make(chan struct{}), waitDone: make(chan struct{}), stderr: stderrBuf,
 	}
+	handshakeTimeout, threadHandshakeTimeout := resolveCodexHandshakeTimeouts(opts)
 	h.client = &codexClient{
 		cfg: cfg, stdin: stdin, pending: make(map[int]*pendingRPC),
-		processDone: make(chan struct{}), handshakeTimeout: opts.HandshakeTimeout,
-		pid: cmd.Process.Pid, activeLaunches: active, notificationProtocol: "unknown",
-	}
-	if h.client.handshakeTimeout <= 0 {
-		h.client.handshakeTimeout = defaultCodexHandshakeTimeout
+		processDone: make(chan struct{}), handshakeTimeout: handshakeTimeout,
+		threadHandshakeTimeout: threadHandshakeTimeout,
+		pid:                    cmd.Process.Pid, activeLaunches: active, notificationProtocol: "unknown",
 	}
 	h.client.acceptNotification = func(method string, params map[string]any) bool {
 		t := h.active.Load()
 		return t != nil && t.gate.accept(method, params)
 	}
-	h.client.requireExplicitTurnCompletion = true
 	h.client.onMessage = func(msg Message) {
 		logCodexAgentMessage(cfg.Logger, msg)
 		if t := h.active.Load(); t != nil {

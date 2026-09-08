@@ -8,6 +8,7 @@
 const MCP_SUPPORTED_PROVIDERS = new Set([
   "claude",
   "codebuddy",
+  "codearts",
   "codex",
   "cursor",
   "grok",
@@ -22,7 +23,10 @@ const MCP_SUPPORTED_PROVIDERS = new Set([
   "qoderclicn",
   "qwen",
   "qwenpaw",
+  "mcode",
   "traecli",
+  "dim",
+  "omp",
 ]);
 
 export function providerSupportsMcpConfig(provider: string | undefined | null): boolean {

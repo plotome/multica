@@ -42,7 +42,7 @@ import {
 } from "@multica/ui/components/ui/dropdown-menu";
 import { ActorAvatar } from "../actor-avatar";
 import { AttributionBadge } from "../../issues/components/attribution-badge";
-import { cancelReasonLabel } from "../../agents/components/tabs/task-failure";
+import { cancelReasonLabel, failureReasonLabel } from "../../agents/components/tabs/task-failure";
 import { RichContent } from "../../rich-content";
 import { api } from "@multica/core/api";
 import {
@@ -51,11 +51,12 @@ import {
   type TranscriptSortDirection,
 } from "@multica/core/agents/stores";
 import type { AgentTask, Agent, AgentRuntime } from "@multica/core/types/agent";
+import { resolveWorkdirCopyTarget } from "@multica/core/issues";
 import { runtimeDisplayName, providerDisplayName } from "@multica/core/runtimes";
 import { useCustomPricingStore } from "@multica/core/runtimes/custom-pricing-store";
 import { redactSecrets } from "./redact";
 import {
-  createNewestFirstFollow,
+  createLiveEndFollow,
   FOLLOW_EDGE_THRESHOLD,
   LINE_SCROLL_PX,
 } from "./transcript-follow";
@@ -94,7 +95,7 @@ import {
   ToolDetailSurface,
 } from "./detail-surfaces";
 import { languageForPath } from "./diff-highlight";
-import { useT } from "../../i18n";
+import { useLocale, useT } from "../../i18n";
 import {
   formatTokens,
   formatUsd,
@@ -158,8 +159,8 @@ function formatOffset(ms: number): string {
   return `+${hours}:${String(minutes % 60).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
-function formatRunTime(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, {
+function formatRunTime(iso: string, locale: string): string {
+  return new Date(iso).toLocaleString(locale, {
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -306,6 +307,7 @@ export function AgentTranscriptDialog({
   headerSlot,
 }: AgentTranscriptDialogProps) {
   const { t } = useT("agents");
+  const locale = useLocale();
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(() => new Set());
   const [query, setQuery] = useState("");
@@ -315,6 +317,10 @@ export function AgentTranscriptDialog({
   const [copiedBranch, showCopiedBranch] = useCopyFeedback();
   const [agentInfo, setAgentInfo] = useState<Agent | null>(null);
   const [runtimeInfo, setRuntimeInfo] = useState<AgentRuntime | null>(null);
+  const workdirCopyTarget = useMemo(
+    () => resolveWorkdirCopyTarget([task]),
+    [task],
+  );
   const sortDirection = useTranscriptViewStore((s) => s.sortDirection);
   const setSortDirection = useTranscriptViewStore((s) => s.setSortDirection);
   // Filters always persist across opens — a facet a run doesn't have simply
@@ -328,7 +334,7 @@ export function AgentTranscriptDialog({
   // controller (see transcript-follow.ts for the model); this component only
   // wires DOM events to it. A stable instance, never re-rendered by scroll
   // traffic.
-  const followCtl = useMemo(() => createNewestFirstFollow(), []);
+  const followCtl = useMemo(() => createLiveEndFollow(), []);
   const detachScrollerRef = useRef<(() => void) | null>(null);
 
   const handleScrollerRef = useCallback(
@@ -336,30 +342,55 @@ export function AgentTranscriptDialog({
       detachScrollerRef.current?.();
       detachScrollerRef.current = null;
       if (!(el instanceof HTMLElement)) return;
+      let inputFrame: number | null = null;
+      const stageInput = (delta: number) => {
+        followCtl.input(delta);
+        if (inputFrame !== null) cancelAnimationFrame(inputFrame);
+        inputFrame = requestAnimationFrame(() => {
+          inputFrame = null;
+          followCtl.endInputFrame();
+        });
+      };
       const onWheel = (e: WheelEvent) => {
         const scale =
           e.deltaMode === 1 ? LINE_SCROLL_PX : e.deltaMode === 2 ? el.clientHeight : 1;
-        followCtl.input(e.deltaY * scale);
+        stageInput(e.deltaY * scale);
       };
+      let touchId: number | null = null;
       let lastTouchY: number | null = null;
+      const trackedTouch = (touches: TouchList) =>
+        Array.from(touches).find((touch) => touch.identifier === touchId);
       const onTouchStart = (e: TouchEvent) => {
-        lastTouchY = e.touches[0]?.clientY ?? null;
+        if (touchId !== null) return;
+        const touch = e.changedTouches[0] ?? e.touches[0];
+        if (!touch) return;
+        touchId = touch.identifier;
+        lastTouchY = touch.clientY;
+        followCtl.touchStart();
       };
       const onTouchMove = (e: TouchEvent) => {
-        const y = e.touches[0]?.clientY;
-        if (y === undefined) return;
+        const touch = trackedTouch(e.touches);
+        if (!touch) return;
         // Finger moving up scrolls the content down (away from the live end).
-        if (lastTouchY !== null) followCtl.input(lastTouchY - y);
-        lastTouchY = y;
+        if (lastTouchY !== null) stageInput(lastTouchY - touch.clientY);
+        lastTouchY = touch.clientY;
+      };
+      const onTouchEnd = (e: TouchEvent) => {
+        if (touchId === null || trackedTouch(e.touches)) return;
+        touchId = null;
+        lastTouchY = null;
+        followCtl.touchEnd();
       };
       const onKeyDown = (e: KeyboardEvent) => {
         // Only keys aimed at the scroller itself; Space/arrows bubbling from
         // row controls are not scroll intent.
         if (e.target !== el) return;
-        if (e.key === "ArrowDown") followCtl.input(LINE_SCROLL_PX);
-        else if (e.key === "ArrowUp") followCtl.input(-LINE_SCROLL_PX);
-        else if (e.key === "PageDown" || e.key === " ") followCtl.input(el.clientHeight);
-        else if (e.key === "PageUp") followCtl.input(-el.clientHeight);
+        if (e.key === "ArrowDown") stageInput(LINE_SCROLL_PX);
+        else if (e.key === "ArrowUp") stageInput(-LINE_SCROLL_PX);
+        else if (e.key === "PageDown") stageInput(el.clientHeight);
+        // Shift+Space pages up — toward this list's live end.
+        else if (e.key === " ") stageInput(e.shiftKey ? -el.clientHeight : el.clientHeight);
+        else if (e.key === "PageUp") stageInput(-el.clientHeight);
         else if (e.key === "End") followCtl.disengage();
       };
       // Scrollbar drags hit the scroller element itself; clicks on row
@@ -383,14 +414,20 @@ export function AgentTranscriptDialog({
       el.addEventListener("wheel", onWheel, { passive: true });
       el.addEventListener("touchstart", onTouchStart, { passive: true });
       el.addEventListener("touchmove", onTouchMove, { passive: true });
+      el.addEventListener("touchend", onTouchEnd, { passive: true });
+      el.addEventListener("touchcancel", onTouchEnd, { passive: true });
       el.addEventListener("keydown", onKeyDown);
       el.addEventListener("mousedown", onPointerDown);
       window.addEventListener("mouseup", onPointerUp, { capture: true });
       el.addEventListener("scroll", onScroll, { passive: true });
       detachScrollerRef.current = () => {
+        if (inputFrame !== null) cancelAnimationFrame(inputFrame);
+        followCtl.endInputFrame();
         el.removeEventListener("wheel", onWheel);
         el.removeEventListener("touchstart", onTouchStart);
         el.removeEventListener("touchmove", onTouchMove);
+        el.removeEventListener("touchend", onTouchEnd);
+        el.removeEventListener("touchcancel", onTouchEnd);
         el.removeEventListener("keydown", onKeyDown);
         el.removeEventListener("mousedown", onPointerDown);
         window.removeEventListener("mouseup", onPointerUp, { capture: true });
@@ -398,6 +435,7 @@ export function AgentTranscriptDialog({
         // The scroller can detach mid-drag (listEpoch remount); a stuck
         // held-mouse flag would suppress enforcement forever.
         followCtl.pointerUp();
+        followCtl.touchEnd();
       };
     },
     [followCtl],
@@ -418,20 +456,25 @@ export function AgentTranscriptDialog({
   // why the pairing is positional.
   const steps = useMemo(() => buildSteps(items), [items]);
 
+  // A facet reads as what its rows look like: the glyph the rows carry, and the
+  // name the rows print. The first step of a kind stands in for the glyph. The
+  // `tool:` prefix stays in the key (it is what gets persisted) but never
+  // reaches the menu — the rows say `Bash`, so the facet says `Bash` too.
   const filterOptions = useMemo(() => {
-    const options = new Map<string, string>();
+    const options = new Map<string, { label: string; step: TraceStep }>();
     for (const step of steps) {
       const key = stepFilterKey(step);
       if (options.has(key)) continue;
-      options.set(
-        key,
-        step.kind === "call"
-          ? key
-          : traceEventLabel({ type: step.item.type, tool: step.item.tool }),
-      );
+      options.set(key, {
+        label:
+          step.kind === "call"
+            ? step.tool || t(($) => $.transcript.kind_tool)
+            : traceEventLabel({ type: step.item.type, tool: step.item.tool }),
+        step,
+      });
     }
-    return Array.from(options.entries()).sort((a, b) => a[1].localeCompare(b[1]));
-  }, [steps]);
+    return Array.from(options.entries()).sort((a, b) => a[1].label.localeCompare(b[1].label));
+  }, [steps, t]);
 
   const filterOptionKeys = useMemo(
     () => new Set(filterOptions.map(([value]) => value)),
@@ -608,12 +651,12 @@ export function AgentTranscriptDialog({
   );
 
   const handleCopyWorkdir = useCallback(() => {
-    if (!task.relative_work_dir) return;
-    void copyText(task.relative_work_dir).then((ok) => {
+    if (!workdirCopyTarget) return;
+    void copyText(workdirCopyTarget.path).then((ok) => {
       if (!ok) return;
       showCopiedWorkdir();
     });
-  }, [task.relative_work_dir, showCopiedWorkdir]);
+  }, [workdirCopyTarget, showCopiedWorkdir]);
 
   // Worktree-mode runs deliver a branch instead of edits in the working copy,
   // so copying the name is the fastest path to `git diff <branch>`.
@@ -705,10 +748,13 @@ export function AgentTranscriptDialog({
         // A server-cancelled run (worktree claim gate, preserved-work
         // delivery) carries a persisted reason the user must act on; surface
         // it on the badge instead of a bare "Cancelled". User-initiated
-        // cancels have no reason and keep the plain label.
-        const cancelReason = cancelReasonLabel(task);
+        // cancels have no reason and keep the plain label. The badge carries
+        // no `title`: the raw `task.error` behind it is untranslated
+        // operator prose (#7411) and belongs in Run details, not in hover
+        // text on a status pill.
+        const cancelReason = cancelReasonLabel(task, t);
         return (
-          <span className={cn(base, "bg-muted text-muted-foreground")} title={task.error ?? undefined}>
+          <span className={cn(base, "bg-muted text-muted-foreground")}>
             <XCircle className="h-3 w-3" />
             {cancelReason
               ? `${t(($) => $.transcript.status_cancelled)} · ${cancelReason}`
@@ -755,16 +801,16 @@ export function AgentTranscriptDialog({
           ? t(($) => $.transcript.trigger_chat)
           : task.kind === "quick_create"
             ? t(($) => $.transcript.trigger_quick_create)
-            : task.kind === "direct" || task.handoff_note
+            : task.kind === "direct"
               ? t(($) => $.transcript.trigger_direct)
               : t(($) => $.transcript.trigger_initial);
 
   // Diagnostic detail for the ⓘ popover: everything a reader needs only when
   // debugging this specific run, kept off the always-visible surface.
   const providerLabel = runtimeInfo?.provider ? transcriptProviderLabel(runtimeInfo.provider) : null;
-  const createdLabel = task.created_at ? formatRunTime(task.created_at) : null;
-  const startedLabel = task.started_at ? formatRunTime(task.started_at) : null;
-  const completedLabel = task.completed_at ? formatRunTime(task.completed_at) : null;
+  const createdLabel = task.created_at ? formatRunTime(task.created_at, locale) : null;
+  const startedLabel = task.started_at ? formatRunTime(task.started_at, locale) : null;
+  const completedLabel = task.completed_at ? formatRunTime(task.completed_at, locale) : null;
   const hasTriggeredBy = !!task.attribution?.initiator;
   // This run's own spend. Present on transcripts opened from the issue
   // execution log (the endpoint that hydrates usage); absent elsewhere, where
@@ -775,10 +821,23 @@ export function AgentTranscriptDialog({
   // this figure, same as on the other usage surfaces.
   useCustomPricingStore((s) => s.pricings);
   const usage = summarizeTaskUsage(task.usage);
+  // Two separate things, deliberately not one string (#7411):
+  //   • `reasonLabel` — the localized reason, derived from the stable
+  //     `failure_reason` enum. This is the user-facing explanation.
+  //   • `task.error` — the raw diagnostic the server/daemon persisted, in
+  //     English, for classification and logs. Kept readable (it is how you
+  //     find "which worktree holds my preserved work" and "which machine
+  //     needs upgrading") but labelled as a technical detail rather than
+  //     presented as the reason, and never merged into the localized text.
+  const reasonLabel =
+    task.status === "failed"
+      ? failureReasonLabel(task.failure_reason, t)
+      : cancelReasonLabel(task, t);
   const hasRunDetails =
     !!runtimeInfo ||
-    !!task.relative_work_dir ||
+    !!workdirCopyTarget?.relativePath ||
     !!task.branch_name ||
+    !!reasonLabel ||
     !!task.error ||
     !!createdLabel ||
     !!startedLabel ||
@@ -890,14 +949,30 @@ export function AgentTranscriptDialog({
                       {runtimeInfo && (
                         <RunDetailRow label={t(($) => $.transcript.details_mode)} value={runtimeInfo.runtime_mode} />
                       )}
-                      {task.relative_work_dir && (
+                      {workdirCopyTarget?.relativePath && (
                         <RunDetailRow
-                          label={t(($) => $.transcript.details_workdir)}
-                          value={task.relative_work_dir}
+                          label={
+                            workdirCopyTarget.source ===
+                            "durable_project_directory"
+                              ? t(
+                                  ($) =>
+                                    $.transcript.details_project_directory,
+                                )
+                              : t(($) => $.transcript.details_workdir)
+                          }
+                          value={workdirCopyTarget.relativePath}
                           mono
                           onCopy={handleCopyWorkdir}
                           copied={copiedWorkdir}
-                          copyTitle={t(($) => $.transcript.copy_workdir)}
+                          copyTitle={
+                            workdirCopyTarget.source ===
+                            "durable_project_directory"
+                              ? t(
+                                  ($) =>
+                                    $.transcript.copy_project_directory,
+                                )
+                              : t(($) => $.transcript.copy_workdir)
+                          }
                         />
                       )}
                       {task.branch_name && (
@@ -910,14 +985,13 @@ export function AgentTranscriptDialog({
                           copyTitle={t(($) => $.transcript.copy_branch)}
                         />
                       )}
-                      {/* The full persisted error, for failed AND
-                          server-cancelled runs — this is where "which
-                          worktree holds my preserved work" and "which
-                          machine needs upgrading" are actually readable. */}
-                      {task.error && (
+                      {/* The localized reason, from the stable
+                          `failure_reason` enum — this is the explanation, and
+                          it reads in the user's language. */}
+                      {reasonLabel && (
                         <RunDetailRow
                           label={t(($) => $.transcript.details_reason)}
-                          value={task.error}
+                          value={reasonLabel}
                         />
                       )}
                       {createdLabel && (
@@ -928,6 +1002,23 @@ export function AgentTranscriptDialog({
                       )}
                       {completedLabel && (
                         <RunDetailRow label={t(($) => $.transcript.details_completed)} value={completedLabel} />
+                      )}
+                      {/* The raw persisted diagnostic, last and behind its own
+                          divider. It is English prose written by the server
+                          and daemon for logs and classification, so it is
+                          labelled "Technical details" — a translated heading
+                          over untranslated content — rather than shown as the
+                          run's reason (#7411). Still the place where "which
+                          worktree holds my preserved work" is readable. */}
+                      {task.error && (
+                        <>
+                          <div className="my-2 h-px bg-border" />
+                          <RunDetailRow
+                            label={t(($) => $.transcript.details_diagnostics)}
+                            value={task.error}
+                            mono
+                          />
+                        </>
                       )}
                       {usage && (
                         <>
@@ -1036,13 +1127,19 @@ export function AgentTranscriptDialog({
                 )}
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-auto">
-                {filterOptions.map(([value, label]) => (
+                {filterOptions.map(([value, option]) => (
                   <DropdownMenuCheckboxItem
                     key={value}
                     checked={selectedFilterKeys.includes(value)}
                     onCheckedChange={() => toggleFilterKey(value)}
                   >
-                    {label}
+                    <span className="flex items-center gap-1.5">
+                      <StepIcon
+                        step={option.step}
+                        className="h-3 w-3 shrink-0 text-muted-foreground"
+                      />
+                      {option.label}
+                    </span>
                   </DropdownMenuCheckboxItem>
                 ))}
                 {selectedFilterKeys.length > 0 && (
@@ -1140,15 +1237,13 @@ export function AgentTranscriptDialog({
                 }
                 atBottomThreshold={FOLLOW_EDGE_THRESHOLD}
                 atTopThreshold={FOLLOW_EDGE_THRESHOLD}
-                atTopStateChange={(atTop) => followCtl.onAtTopChange(atTop)}
+                atTopStateChange={(atTop) => followCtl.onAtEdgeChange(atTop)}
                 scrollerRef={handleScrollerRef}
                 computeItemKey={(_, row) => row.seq}
                 components={LIST_COMPONENTS}
                 itemContent={(_, row) => (
                   <TranscriptRow
                     row={row}
-                    agentName={agentName || agentInfo?.name || ""}
-                    agentId={task.agent_id}
                     runStartMs={runStartMs}
                     isLive={isLive}
                     selectedSeq={selectedSeq}
@@ -1261,8 +1356,6 @@ function RunOutcomeRow({
 
 interface TranscriptRowProps {
   row: TraceRow;
-  agentName: string;
-  agentId?: string;
   runStartMs?: number;
   isLive: boolean;
   selectedSeq: number | null;
@@ -1280,12 +1373,13 @@ function TranscriptRow(props: TranscriptRowProps) {
 
 /** The offset column: where in the run this happened. */
 function OffsetCell({ startedAt, runStartMs }: { startedAt?: string; runStartMs?: number }) {
+  const locale = useLocale();
   const at = timeMs(startedAt);
   const label = at !== undefined && runStartMs !== undefined ? formatOffset(at - runStartMs) : "";
   return (
     <span
       className="w-11 shrink-0 pt-0.5 text-right font-mono text-micro tabular-nums text-faint-foreground"
-      title={startedAt ? new Date(startedAt).toLocaleString() : undefined}
+      title={startedAt ? new Date(startedAt).toLocaleString(locale) : undefined}
     >
       {label}
     </span>
@@ -1316,30 +1410,26 @@ function DurationCell({ ms, pending }: { ms?: number; pending?: boolean }) {
  * This is the layer inversion the redesign turns on: the report used to look
  * exactly like a `Read`, so the one thing worth reading was the hardest thing
  * to find. Prose is content and stays open; tool calls are evidence and fold.
+ *
+ * Identity is deliberately absent here. A transcript is one run by one agent —
+ * `TraceMessageStep` carries no per-step actor, so an avatar and name on the
+ * row would be the same two values repeated for every step, and the header
+ * already states them. Repeating them cost a semibold 12px line above 12px
+ * body text, which on a run of short steps made the row's heaviest element its
+ * least informative one.
+ *
+ * What the row does keep is its kind: the same `StepIcon` column every other
+ * row carries, so "Agent" in the filter has something to point at. Kind, not
+ * identity — the glyph says "the agent's own words", which is what the facet
+ * selects, and it says it in 12px without a repeated string.
  */
-function ProseRow({
-  row,
-  agentName,
-  agentId,
-  runStartMs,
-}: TranscriptRowProps & { row: TraceMessageStep }) {
+function ProseRow({ row, runStartMs }: TranscriptRowProps & { row: TraceMessageStep }) {
   return (
     <div className="group flex items-start gap-2 px-4 py-2.5">
       <OffsetCell startedAt={row.startedAt} runStartMs={runStartMs} />
       <span aria-hidden className="mt-1 w-0.5 self-stretch rounded-full bg-success" />
-      <div className="mt-0.5 shrink-0">
-        {agentId ? (
-          <ActorAvatar actorType="agent" actorId={agentId} size="sm" />
-        ) : (
-          <div className="flex h-5 w-5 items-center justify-center rounded-full bg-info/10 text-info">
-            <Bot className="h-3 w-3" />
-          </div>
-        )}
-      </div>
+      <StepIcon step={row} className="mt-1 h-3 w-3 shrink-0 text-muted-foreground" />
       <div className="min-w-0 flex-1 pr-2">
-        {agentName && (
-          <div className="mb-0.5 text-caption font-semibold">{agentName}</div>
-        )}
         <RichContent
           content={row.item.content ?? ""}
           density="compact"

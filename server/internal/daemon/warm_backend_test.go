@@ -308,6 +308,11 @@ func TestCodexWarmEligibilityFailsClosedForTaskScopedMCP(t *testing.T) {
 		t.Fatal("connected app broker must bypass warm hosting")
 	}
 	task.ConnectedApps = nil
+	task.PluginHookTools = []PluginHookTool{{}}
+	if codexWarmEligible(task, agent.ExecOptions{}, env, false) {
+		t.Fatal("plugin hook MCP must bypass warm hosting")
+	}
+	task.PluginHookTools = nil
 	if codexWarmEligible(Task{IssueID: "issue"}, agent.ExecOptions{}, env, true) {
 		t.Fatal("custom runtime profile must bypass warm hosting")
 	}

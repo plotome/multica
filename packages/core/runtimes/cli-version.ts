@@ -89,31 +89,6 @@ export function readRuntimeCliVersion(metadata: Record<string, unknown> | undefi
 }
 
 /**
- * Frontend mirror of the server's `MinHandoffCLIVersion` soft gate
- * (`server/pkg/agent/version.go`). The assignment handoff note is only rendered
- * into the run's opening prompt by daemons at or above this multica CLI version
- * (MUL-3375); older daemons silently drop it. Unlike the quick-create gate this
- * never blocks the assignment — the UI just grays out the note box and warns.
- *
- * Keep in lockstep with the server constant; the two are enforced independently
- * (the server is authoritative) but must agree so the warning matches reality.
- */
-export const MIN_HANDOFF_CLI_VERSION = "0.3.28";
-
-/**
- * Whether a daemon-reported CLI version is new enough to render a handoff note.
- * Mirrors server `agent.HandoffSupported`: missing / unparsable / below-minimum
- * all degrade to `false`, and dev-built daemons (git-describe shape) always
- * pass — the version string is the shared signal, so frontend and server agree
- * by construction. Pure and synchronous, so the note box can settle from the
- * already-warm runtime cache instead of waiting on the trigger-preview
- * round-trip, exactly like the quick-create version gate.
- */
-export function handoffSupported(detected: string | undefined | null): boolean {
-  return meetsMinCliVersion(detected, MIN_HANDOFF_CLI_VERSION);
-}
-
-/**
  * First release whose daemon renders the chat session's project context
  * (description + resources) into the run brief (PR #5765, ships in v0.4.10).
  * Older daemons still receive and honor the project's repos — the server
@@ -121,16 +96,15 @@ export function handoffSupported(detected: string | undefined | null): boolean {
  * the Project Context section, so the durable description never reaches the
  * agent. SOFT gate: selecting a project always works; the UI only warns.
  *
- * Frontend-only constant: unlike handoff there is no server preview endpoint
- * computing this, so there is no server twin to keep in lockstep with.
+ * Frontend-only constant: there is no server preview endpoint computing this,
+ * so there is no server twin to keep in lockstep with.
  */
 export const MIN_CHAT_PROJECT_CONTEXT_CLI_VERSION = "0.4.10";
 
 /**
  * Whether a daemon-reported CLI version is new enough to inject a chat
- * session's project description into the run brief. Same degrade rules as
- * `handoffSupported`: missing / unparsable / below-minimum are `false`,
- * dev-built daemons (git-describe shape) always pass.
+ * session's project description into the run brief. Missing / unparsable /
+ * below-minimum are `false`; dev-built daemons (git-describe shape) always pass.
  */
 export function chatProjectContextSupported(detected: string | undefined | null): boolean {
   return meetsMinCliVersion(detected, MIN_CHAT_PROJECT_CONTEXT_CLI_VERSION);
@@ -146,54 +120,11 @@ function meetsMinCliVersion(detected: string | undefined | null, minimum: string
 }
 
 /**
- * Minimum daemon CLI version that implements worktree mode for
- * `local_directory` resources (`execution_mode: "worktree"`).
- *
- * Server twin: `MinLocalWorktreeCLIVersion` in `server/pkg/agent/version.go`.
- * Keep the two in lockstep — the server refuses to SAVE a worktree resource
- * below this floor, and this constant only exists so the UI can say so before
- * the user submits rather than surfacing a bare 422.
- *
- * HARD gate, unlike `handoffSupported`: a daemon below the floor does not know
- * the field exists, so it would run the task in place — editing the working
- * copy the user asked to isolate. Degrading to "just try it" is not an option.
- */
-export const MIN_LOCAL_WORKTREE_CLI_VERSION = "0.4.24";
-
-/**
- * Whether a daemon-reported CLI version can run worktree mode. Missing /
- * unparsable / below-minimum are `false`; dev-built daemons (git-describe
- * shape) pass, matching every other gate in this file.
- */
-export function localWorktreeSupported(detected: string | undefined | null): boolean {
-  return meetsMinCliVersion(detected, MIN_LOCAL_WORKTREE_CLI_VERSION);
-}
-
-/**
  * Capability a daemon advertises when it implements worktree mode for
  * local_directory resources. Mirrors `DaemonCapabilityLocalWorktreeV1` in
  * `server/pkg/protocol/messages.go`.
  */
 export const LOCAL_WORKTREE_CAPABILITY = "local-worktree-v1";
-
-/**
- * Whether a runtime advertised worktree support at registration.
- *
- * This replaces a version comparison on purpose. A daemon without the
- * implementation does not merely lose concurrency — it ignores `execution_mode`
- * and edits the user's working copy, which is what the mode exists to prevent.
- * Version strings could not answer that: a dev build reports a git-describe
- * string that `meetsMinCliVersion` deliberately exempts, so a daemon with no
- * worktree code at all passed the check (MUL-5707).
- *
- * Absent metadata (an older daemon that never sent the header) is `false` —
- * this must fail closed, and the server enforces the same thing at claim time.
- */
-export function runtimeSupportsLocalWorktree(metadata: unknown): boolean {
-  if (!metadata || typeof metadata !== "object") return false;
-  const caps = (metadata as { capabilities?: unknown }).capabilities;
-  return Array.isArray(caps) && caps.includes(LOCAL_WORKTREE_CAPABILITY);
-}
 
 /** Minimal runtime shape this module needs; keeps callers from importing types. */
 type RuntimeCapabilityRow = {
@@ -203,17 +134,29 @@ type RuntimeCapabilityRow = {
 };
 
 /**
- * Whether the machine behind `daemonId` currently runs a daemon that supports
- * worktree mode, judged by its MOST RECENTLY SEEN runtime row.
+ * Whether the machine behind `daemonId` has ADVERTISED worktree support, judged
+ * by its most recently seen runtime row.
  *
- * Deliberately not "any row advertised it". Deregistering a runtime only marks
- * the row offline — its metadata survives — so a machine that once ran a
- * capable daemon and then downgraded still has an old capable row beside the
- * fresh incapable one, and an any-match would answer yes forever. The server's
- * `daemonAdvertisesWorktree` uses the same newest-wins rule; the two must agree
- * or the UI offers a mode the API will refuse.
+ * Deliberately a positive signal only, and deliberately not a gate. `false`
+ * means "no runtime row here says yes" — which covers a daemon that genuinely
+ * cannot, a row written before the server recorded capabilities at all, and a
+ * server too old to record them in the first place. Those have different
+ * remedies and the client cannot reliably tell them apart: it would have to
+ * infer the backend's age from data the backend wrote, and a row's silence
+ * outlives the upgrade that fixed it (#7113).
+ *
+ * So the client stopped trying. The server is asked instead — it knows its own
+ * version by construction — at every write path (create project, add resource,
+ * update resource) and again at claim time, which is the gate that actually
+ * keeps agents out of the user's working copy (MUL-5707). This function only
+ * decides whether to PRESELECT parallel mode, where a wrong guess costs a
+ * radio button, not a blocked user or a misleading instruction.
+ *
+ * Newest-row, not any-row: deregistering a runtime only marks it offline and
+ * its metadata survives, so a machine that once advertised the capability and
+ * then downgraded would otherwise keep vouching for itself forever.
  */
-export function daemonSupportsLocalWorktree(
+export function runtimeAdvertisesLocalWorktree(
   runtimes: RuntimeCapabilityRow[],
   daemonId: string | null | undefined,
 ): boolean {
@@ -230,5 +173,8 @@ export function daemonSupportsLocalWorktree(
     const currentSeen = newest.last_seen_at ?? "";
     if (candidateSeen > currentSeen) newest = rt;
   }
-  return newest ? runtimeSupportsLocalWorktree(newest.metadata) : false;
+  const metadata = newest?.metadata;
+  if (!metadata || typeof metadata !== "object") return false;
+  const caps = (metadata as { capabilities?: unknown }).capabilities;
+  return Array.isArray(caps) && caps.includes(LOCAL_WORKTREE_CAPABILITY);
 }

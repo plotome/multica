@@ -221,7 +221,7 @@ func codexWarmEligible(task Task, opts agent.ExecOptions, env *execenv.Environme
 	// Task-scoped brokers and MCP subprocesses may capture credentials outside
 	// shell_environment_policy. Keep them on the proven cold lifecycle until
 	// those transports gain their own per-turn credential refresh contract.
-	if len(task.RemoteMCPConnections) != 0 || len(task.ConnectedApps) != 0 || len(opts.McpConfig) != 0 {
+	if len(task.RemoteMCPConnections) != 0 || len(task.ConnectedApps) != 0 || len(task.PluginHookTools) != 0 || len(opts.McpConfig) != 0 {
 		return false
 	}
 	if agent.CodexArgsConfigureMCP(opts.ExtraArgs) || agent.CodexArgsConfigureMCP(opts.CustomArgs) || codexConfigHasMCP(env.CodexHome) {
@@ -271,7 +271,6 @@ func codexWarmFingerprint(task Task, cfg agent.Config, opts agent.ExecOptions, e
 		Model, Thinking, Tier                           string
 		Root, WorkDir, CodexHome                        string
 		Agent                                           *AgentData
-		PluginDigest                                    string
 		WorkspaceContext, ProjectID, ProjectDescription string
 		RequestingUserProfile                           string
 		CodexConfigDigest                               string
@@ -284,9 +283,6 @@ func codexWarmFingerprint(task Task, cfg agent.Config, opts agent.ExecOptions, e
 		ProjectDescription:    task.ProjectDescription,
 		RequestingUserProfile: task.RequestingUserProfileDescription,
 		CodexConfigDigest:     fileContentDigest(filepath.Join(env.CodexHome, "config.toml")),
-	}
-	if task.PluginExecutionManifest != nil {
-		payload.PluginDigest = task.PluginExecutionManifest.SnapshotDigest
 	}
 	data, _ := json.Marshal(payload)
 	sum := sha256.Sum256(data)

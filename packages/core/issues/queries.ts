@@ -8,7 +8,7 @@ import { api, ApiError } from "../api";
 import type {
   Issue,
   IssueAssigneeType,
-  IssueStatus,
+  IssueStatusCategory,
   IssueTableFacetsRequest,
   IssueTableGroupSpec,
   IssueTableGroupsRequest,
@@ -177,7 +177,21 @@ export const issueKeys = {
   tasksAll: () => ["issues", "tasks"] as const,
   /** Per-issue task list (issue-detail Execution log section). */
   tasks: (issueId: string) => [...issueKeys.tasksAll(), issueId] as const,
+  sourceContextPreview: (wsId: string, anchorCommentId: string) =>
+    ["source-context", "preview", wsId, anchorCommentId] as const,
 };
+
+export function sourceContextPreviewOptions(
+  wsId: string,
+  anchorCommentId: string | null | undefined,
+) {
+  return queryOptions({
+    queryKey: issueKeys.sourceContextPreview(wsId, anchorCommentId ?? ""),
+    queryFn: () => api.getCommentSubIssuePreview(anchorCommentId!),
+    enabled: !!anchorCommentId,
+    staleTime: 0,
+  });
+}
 
 export type MyIssuesFilter = Pick<
   ListIssuesParams,
@@ -217,18 +231,24 @@ export type AssigneeGroupedIssuesFilter = Omit<
 export const ISSUE_PAGE_SIZE = 50;
 
 /**
- * Statuses fetched and paginated into the list/board cache — every lifecycle
- * status, `cancelled` included. `cancelled` is a first-class default status
- * (MUL-4290), so it lives in the cache and renders like any other column;
- * there is no separate "visible board" subset. This constant governs
- * fetch/cache membership.
+ * CATEGORIES fetched and paginated into the list/board cache — all 7,
+ * `cancelled` included. `cancelled` is a first-class default (MUL-4290), so it
+ * lives in the cache and renders like any other column; there is no separate
+ * "visible board" subset. This constant governs fetch/cache membership.
+ *
+ * Keyed on category, not on status key (MUL-6243). A workspace can define any
+ * number of custom statuses, and bucketing by status would mean one more
+ * parallel `listIssues` request on every board load per status added. Bucketing
+ * by category keeps the fan-out fixed at 7 forever; a custom status appears in
+ * the column of the category it inherits, and the card's own badge is what
+ * shows which specific status it is on.
  */
-export const PAGINATED_STATUSES: readonly IssueStatus[] = ALL_STATUSES;
+export const PAGINATED_CATEGORIES: readonly IssueStatusCategory[] = ALL_STATUSES;
 
 /** Flatten a bucketed response to a single Issue[] for consumers that want the whole list. */
 export function flattenIssueBuckets(data: ListIssuesCache) {
   const out = [];
-  for (const status of PAGINATED_STATUSES) {
+  for (const status of PAGINATED_CATEGORIES) {
     const bucket = data.byStatus[status];
     if (bucket) out.push(...bucket.issues);
   }
@@ -237,12 +257,12 @@ export function flattenIssueBuckets(data: ListIssuesCache) {
 
 async function fetchFirstPages(filter: MyIssuesFilter = {}, sort?: IssueSortParam): Promise<ListIssuesCache> {
   const responses = await Promise.all(
-    PAGINATED_STATUSES.map((status) =>
-      api.listIssues({ status, limit: ISSUE_PAGE_SIZE, offset: 0, ...sort, ...filter }),
+    PAGINATED_CATEGORIES.map((category) =>
+      api.listIssues({ status_category: category, limit: ISSUE_PAGE_SIZE, offset: 0, ...sort, ...filter }),
     ),
   );
   const byStatus: ListIssuesCache["byStatus"] = {};
-  PAGINATED_STATUSES.forEach((status, i) => {
+  PAGINATED_CATEGORIES.forEach((status: IssueStatusCategory, i: number) => {
     const res = responses[i]!;
     byStatus[status] = { issues: res.issues, total: res.total };
   });
@@ -422,9 +442,9 @@ export function issueDetailOptions(wsId: string, id: string) {
  *
  * It deliberately does NOT use `/api/issues/search`: that endpoint runs the
  * workspace-wide full-text query (title/description/comment `LIKE`, ranking,
- * snippet subquery, `COUNT(*) OVER()`) which is orders of magnitude more
- * expensive than a point read, and autolink resolution was the dominant
- * caller of it (MUL-6268).
+ * and snippet subqueries) which is orders of magnitude more expensive than a
+ * point read, and autolink resolution was the dominant caller of it
+ * (MUL-6268).
  *
  * Server state → TanStack Query; the key includes `wsId` and the identifier,
  * so identical identifiers across the app share one request. Caller gates

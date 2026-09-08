@@ -17,7 +17,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/storage"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // extContentTypes overrides http.DetectContentType for extensions it gets wrong.
@@ -165,7 +167,7 @@ func (h *Handler) attachmentToResponse(a db.Attachment, mode attachmentURLMode) 
 		UploaderID:   uuidToString(a.UploaderID),
 		Filename:     a.Filename,
 		URL:          a.Url,
-		DownloadURL:  attachmentDownloadPath(id),
+		DownloadURL:  util.AttachmentDownloadPath(id),
 		MarkdownURL:  h.buildMarkdownURL(a, id),
 		ContentType:  a.ContentType,
 		SizeBytes:    a.SizeBytes,
@@ -194,10 +196,6 @@ func (h *Handler) attachmentToResponse(a db.Attachment, mode attachmentURLMode) 
 		resp.ChatMessageID = &s
 	}
 	return resp
-}
-
-func attachmentDownloadPath(id string) string {
-	return "/api/attachments/" + id + "/download"
 }
 
 // buildMarkdownURL chooses the durable URL the client persists into
@@ -234,7 +232,7 @@ func attachmentDownloadPath(id string) string {
 //     already broken before MUL-3192 and stay broken here, but we
 //     don't make them worse.
 func (h *Handler) buildMarkdownURL(a db.Attachment, id string) string {
-	relPath := attachmentDownloadPath(id)
+	relPath := util.AttachmentDownloadPath(id)
 	publicURL := strings.TrimRight(h.cfg.PublicURL, "/")
 
 	if h.storageURLIsPubliclyReadable(a.Url) {
@@ -508,14 +506,13 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		if taskID := r.FormValue("task_id"); taskID != "" {
 			// Authoritative task-token boundary (load-bearing, mirrors
 			// chat_history.go:chatHistorySession). X-Task-ID is only trustworthy
-			// when the auth middleware set it from a task-scoped `mat_` token —
-			// that path is also the ONLY one that stamps X-Actor-Source=task_token
-			// and strips a client-forged X-Task-ID. A normal JWT / `mul_` PAT
-			// leaves X-Actor-Source empty and does NOT strip a forged X-Task-ID,
-			// and resolveActor's fallback will accept a real X-Agent-ID +
-			// X-Task-ID pair. So without this gate a member who learns a task ID
-			// could forge both headers and inject an attachment onto another chat
-			// task's assistant reply — a cross-session/privacy leak.
+			// when the auth middleware set it from a task-scoped `mat_` token:
+			// that is the only branch that stamps it, because the middleware
+			// deletes any client-supplied agent/task identity first (MUL-3428).
+			// The gate is kept explicit because of what it protects — an
+			// attachment injected onto another chat task's assistant reply is a
+			// cross-session privacy leak, and this endpoint should say which
+			// credential it requires rather than rely on a distant strip.
 			if r.Header.Get("X-Actor-Source") != "task_token" {
 				writeError(w, http.StatusForbidden, "task_id upload is only available from within an agent task")
 				return
@@ -570,7 +567,26 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 			// S3 upload succeeded but DB record failed — still return the link
 			// so the file is usable. Log the error for investigation.
 		} else {
-			writeJSON(w, http.StatusOK, h.attachmentToResponse(att, attachmentURLModeFromRequest(r)))
+			if att.IssueRevision > 0 && att.IssueID.Valid {
+				h.publish(protocol.EventIssueAttachmentsChanged, workspaceID, uploaderType, uploaderID, map[string]any{
+					"issue_id":       uuidToString(att.IssueID),
+					"issue_revision": att.IssueRevision,
+				})
+			}
+			if att.CommentRevision > 0 && att.CommentID.Valid {
+				if comment, loadErr := h.Queries.GetCommentInWorkspace(r.Context(), db.GetCommentInWorkspaceParams{
+					ID:          att.CommentID,
+					WorkspaceID: att.WorkspaceID,
+				}); loadErr == nil {
+					commentID := uuidToString(comment.ID)
+					reactions := h.groupReactions(r, []pgtype.UUID{comment.ID})
+					attachments := h.groupAttachments(r, []pgtype.UUID{comment.ID})
+					h.publish(protocol.EventCommentUpdated, workspaceID, uploaderType, uploaderID, map[string]any{
+						"comment": commentToResponse(comment, reactions[commentID], attachments[commentID]),
+					})
+				}
+			}
+			writeJSON(w, http.StatusOK, h.attachmentToResponse(att.Attachment(), attachmentURLModeFromRequest(r)))
 			return
 		}
 
@@ -1401,6 +1417,12 @@ func (h *Handler) DeleteAttachment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "attachment not found")
 		return
 	}
+	// Captured-context attachments are immutable historical copies. They are
+	// deleted only with their target issue, workspace, or abandoned context.
+	if att.SourceContextID.Valid {
+		writeError(w, http.StatusNotFound, "attachment not found")
+		return
+	}
 
 	// Only the uploader (or workspace admin) can delete
 	uploaderID := uuidToString(att.UploaderID)
@@ -1413,13 +1435,33 @@ func (h *Handler) DeleteAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.Queries.DeleteAttachment(r.Context(), db.DeleteAttachmentParams{
+	deleted, err := h.Queries.DeleteAttachment(r.Context(), db.DeleteAttachmentParams{
 		ID:          att.ID,
 		WorkspaceID: att.WorkspaceID,
-	}); err != nil {
+	})
+	if err != nil {
 		slog.Error("failed to delete attachment", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to delete attachment")
 		return
+	}
+	if deleted.Changed && att.IssueID.Valid {
+		h.publish(protocol.EventIssueAttachmentsChanged, workspaceID, "member", userID, map[string]any{
+			"issue_id":       uuidToString(att.IssueID),
+			"issue_revision": deleted.IssueRevision,
+		})
+	}
+	if deleted.Changed && att.CommentID.Valid {
+		if comment, loadErr := h.Queries.GetCommentInWorkspace(r.Context(), db.GetCommentInWorkspaceParams{
+			ID:          att.CommentID,
+			WorkspaceID: att.WorkspaceID,
+		}); loadErr == nil {
+			commentID := uuidToString(comment.ID)
+			reactions := h.groupReactions(r, []pgtype.UUID{comment.ID})
+			attachments := h.groupAttachments(r, []pgtype.UUID{comment.ID})
+			h.publish(protocol.EventCommentUpdated, workspaceID, "member", userID, map[string]any{
+				"comment": commentToResponse(comment, reactions[commentID], attachments[commentID]),
+			})
+		}
 	}
 
 	h.deleteS3Object(r.Context(), att.Url)
@@ -1430,16 +1472,16 @@ func (h *Handler) DeleteAttachment(w http.ResponseWriter, r *http.Request) {
 // Attachment linking
 // ---------------------------------------------------------------------------
 
-// linkAttachmentsByIssueIDs links the given attachment IDs to an issue.
-// Only updates attachments that have no issue_id yet.
-func (h *Handler) linkAttachmentsByIssueIDs(ctx context.Context, issueID, workspaceID pgtype.UUID, ids []pgtype.UUID) {
-	if err := h.Queries.LinkAttachmentsToIssue(ctx, db.LinkAttachmentsToIssueParams{
-		IssueID:     issueID,
-		WorkspaceID: workspaceID,
-		Column3:     ids,
-	}); err != nil {
-		slog.Error("failed to link attachments to issue", "error", err)
-	}
+// linkAttachmentsByIssueIDs links unbound attachments to an issue. A caller
+// that did not already advance the issue revision can ask this visible change
+// to advance it exactly once.
+func (h *Handler) linkAttachmentsByIssueIDs(ctx context.Context, issueID, workspaceID pgtype.UUID, ids []pgtype.UUID, bumpRevision bool) (db.LinkAttachmentsToIssueRow, error) {
+	return h.Queries.LinkAttachmentsToIssue(ctx, db.LinkAttachmentsToIssueParams{
+		IssueID:       issueID,
+		WorkspaceID:   workspaceID,
+		AttachmentIds: ids,
+		BumpRevision:  bumpRevision,
+	})
 }
 
 // linkAttachmentsByIDs links the given attachment IDs to a comment.

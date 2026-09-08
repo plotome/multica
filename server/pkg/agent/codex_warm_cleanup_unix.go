@@ -113,18 +113,29 @@ func codexWarmExtraProcesses(groupID int, baseline map[int]struct{}) ([]int, err
 }
 
 func codexWarmProcessGroupMembers(groupID int) (map[int]struct{}, error) {
-	out, err := exec.Command("ps", "-axo", "pid=,pgid=").Output()
+	out, err := exec.Command("ps", "-axo", "pid=,pgid=,stat=").Output()
 	if err != nil {
 		return nil, fmt.Errorf("list process groups: %w", err)
 	}
+	return parseCodexWarmProcessGroupMembers(out, groupID)
+}
+
+func parseCodexWarmProcessGroupMembers(out []byte, groupID int) (map[int]struct{}, error) {
 	members := make(map[int]struct{})
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) != 2 {
+		if len(fields) != 3 {
 			continue
 		}
 		pgid, pgidErr := strconv.Atoi(fields[1])
 		if pgidErr != nil || pgid != groupID {
+			continue
+		}
+		// A zombie has exited and cannot execute code or retain a credential;
+		// Linux may keep it visible until the long-lived app-server reaps it.
+		// Waiting for it here would deadlock host reuse even though cleanup is
+		// already complete. The live parent remains in the baseline separately.
+		if strings.HasPrefix(strings.ToUpper(fields[2]), "Z") {
 			continue
 		}
 		pid, pidErr := strconv.Atoi(fields[0])

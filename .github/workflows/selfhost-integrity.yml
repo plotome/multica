@@ -1,0 +1,35 @@
+name: Selfhost integration integrity
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  accepted-patches:
+    if: github.repository == 'plotome/multica'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Check accepted patch ancestry and regression coverage
+        run: python3 scripts/check-selfhost-patches.py
+      - name: Test the integrity gate
+        run: python3 scripts/check-selfhost-patches.test.py
+      - name: Verify conversation and task isolation contracts
+        working-directory: server
+        run: >-
+          ../scripts/go-test-with-agent-cli-guard.sh --
+          go test -race -p 2 -parallel 2
+          ./internal/daemon ./internal/daemon/execenv ./pkg/agent
+          -run 'Test(PersistentLocalWorktree|IsolatedPrepareReusesPersistentPhysicalWorktree|PrunePersistentLocalWorktrees|AcquireLocalDirectoryLockSerializesPersistentConversation|CodexStartOrResumeThread|CodexTurnNotificationGate|ConfigureCodexTaskShellEnvironment|CodexTaskShellEnvInheritsRealHome)'
+          -count=1 -timeout=5m

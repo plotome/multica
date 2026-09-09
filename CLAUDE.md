@@ -249,6 +249,10 @@ Do not claim verification passed unless you ran it. If you skip checks because t
 
 ## Commits and Releases
 
+- This fork's integration and update contract is `docs/selfhost-updates.md`.
+  Before proposing a selfhost deployment, run `scripts/check-selfhost-patches.py`
+  against the target and deployed build identity. Preserve accepted patch ancestry;
+  a successful build alone does not establish upgrade completeness.
 - Commits should be atomic and use conventional prefixes: `feat(scope)`, `fix(scope)`, `refactor(scope)`, `docs`, `test(scope)`, `chore(scope)`.
 - A production deployment requires a CLI release tag on `main`: create `v0.x.x`, push it, and let `release.yml` publish binaries and the Homebrew tap.
 - Bump patch by default unless the user specifies a version.

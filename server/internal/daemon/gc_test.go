@@ -72,6 +72,100 @@ func createTaskDir(t *testing.T, root, wsID, dirName string, meta *execenv.GCMet
 	return taskDir
 }
 
+func createPersistentGCWorktree(t *testing.T, d *Daemon, kind, conversationID string) (string, execenv.PersistentLocalWorktreeRecord) {
+	t.Helper()
+	repo := createGCGitRepo(t)
+	runGitForGC(t, repo, "config", "user.name", "Test User")
+	runGitForGC(t, repo, "config", "user.email", "test@test.com")
+	wt, err := execenv.PrepareLocalWorktree(execenv.LocalWorktreeParams{
+		LocalPath:        repo,
+		EnvRoot:          t.TempDir(),
+		PersistentRoot:   d.cfg.WorkspacesRoot,
+		Provider:         "claude",
+		AgentName:        "GC Agent",
+		TaskID:           "11112222-3333-4444-5555-666677778888",
+		ConversationKey:  "mul-123",
+		WorkspaceID:      "11112222-3333-4444-5555-000000000001",
+		AgentID:          "11112222-3333-4444-5555-000000000002",
+		ConversationID:   conversationID,
+		ConversationKind: kind,
+	}, slog.Default())
+	if err != nil {
+		t.Fatalf("PrepareLocalWorktree: %v", err)
+	}
+	if _, err := wt.Finalize(slog.Default()); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	records := execenv.ListPersistentLocalWorktrees(d.cfg.WorkspacesRoot, slog.Default())
+	if len(records) != 1 {
+		t.Fatalf("persistent records = %d, want 1", len(records))
+	}
+	record := records[0]
+	record.LastUsedAt = time.Now().Add(-48 * time.Hour)
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("marshal aged record: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(record.EntryRoot, "state.json"), data, 0o600); err != nil {
+		t.Fatalf("write aged record: %v", err)
+	}
+	return repo, record
+}
+
+func TestPrunePersistentLocalWorktreesReclaimsTerminalIssueAndKeepsBranch(t *testing.T) {
+	issueID := "11112222-3333-4444-5555-000000000003"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/daemon/issues/"+issueID+"/gc-check", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(IssueGCStatus{Status: "done", UpdatedAt: time.Now().Add(-48 * time.Hour)})
+	})
+	d := newGCTestDaemon(t, mux)
+	d.cfg.GCPersistentLocalWorktreeTTL = 24 * time.Hour
+	repo, record := createPersistentGCWorktree(t, d, string(execenv.GCKindIssue), issueID)
+
+	stats := &gcStats{}
+	d.prunePersistentLocalWorktrees(t.Context(), stats)
+
+	if stats.persistentWorktreesReclaimed != 1 {
+		t.Fatalf("persistentWorktreesReclaimed = %d, want 1", stats.persistentWorktreesReclaimed)
+	}
+	if _, err := os.Stat(record.EntryRoot); !os.IsNotExist(err) {
+		t.Fatalf("persistent entry still exists: %v", err)
+	}
+	if !gitRefExists(t, repo, "refs/heads/"+record.Branch) {
+		t.Fatalf("delivered branch %q was deleted with checkout", record.Branch)
+	}
+}
+
+func TestPrunePersistentLocalWorktreesSkipsLockedConversation(t *testing.T) {
+	issueID := "11112222-3333-4444-5555-000000000004"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/daemon/issues/"+issueID+"/gc-check", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(IssueGCStatus{Status: "cancelled", UpdatedAt: time.Now().Add(-48 * time.Hour)})
+	})
+	d := newGCTestDaemon(t, mux)
+	d.cfg.GCPersistentLocalWorktreeTTL = 24 * time.Hour
+	_, record := createPersistentGCWorktree(t, d, string(execenv.GCKindIssue), issueID)
+
+	release, err := d.localPathLocks.Acquire(t.Context(), record.EntryRoot, "running-task", nil)
+	if err != nil {
+		t.Fatalf("lock persistent entry: %v", err)
+	}
+	stats := &gcStats{}
+	d.prunePersistentLocalWorktrees(t.Context(), stats)
+	if stats.persistentWorktreesReclaimed != 0 {
+		t.Fatalf("reclaimed locked worktree: %d", stats.persistentWorktreesReclaimed)
+	}
+	if _, err := os.Stat(record.WorktreePath); err != nil {
+		t.Fatalf("locked worktree was removed: %v", err)
+	}
+	release()
+
+	d.prunePersistentLocalWorktrees(t.Context(), stats)
+	if stats.persistentWorktreesReclaimed != 1 {
+		t.Fatalf("persistentWorktreesReclaimed after unlock = %d, want 1", stats.persistentWorktreesReclaimed)
+	}
+}
+
 // TestRunGC_StrandedTaskRootRecordsFollowTaskStatus guards the wiring AND the
 // invariant that makes the sweep safe.
 //

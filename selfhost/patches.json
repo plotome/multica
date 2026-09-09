@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "patches": [
+    {
+      "id": "persistent-conversation-worktrees",
+      "introduced_by": "4eadd28b3c588d38ebe8d83820b1ec17fa151a79",
+      "required_files": ["server/internal/daemon/execenv/persistent_local_worktree.go"],
+      "required_tests": [
+        "TestPersistentLocalWorktreeConfig",
+        "TestPersistentLocalWorktreeReusesPhysicalCheckoutAndRefreshesUserState",
+        "TestPersistentLocalWorktreeSeparatesAgents",
+        "TestIsolatedPrepareReusesPersistentPhysicalWorktree",
+        "TestPersistentLocalWorktreeCrashRecoveryDoesNotCommitRuntimeArtifacts",
+        "TestPrunePersistentLocalWorktreesSkipsLockedConversation"
+      ]
+    },
+    {
+      "id": "per-task-codex-processes",
+      "introduced_by": "387032948d8aa1ed4387bf2260dd51da1394d32c",
+      "required_files": ["server/pkg/agent/codex.go"],
+      "absent_files": [
+        "server/internal/daemon/warm_pool.go",
+        "server/internal/daemon/warm_backend.go",
+        "server/pkg/agent/codex_warm.go"
+      ],
+      "required_tests": [
+        "TestCodexStartOrResumeThreadResumesPriorThread",
+        "TestCodexTurnNotificationGateDropsResumeReplayAndOtherTurns",
+        "TestConfigureCodexTaskShellEnvironment",
+        "TestCodexTaskShellEnvInheritsRealHome"
+      ]
+    }
+  ]
+}

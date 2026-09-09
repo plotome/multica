@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 )
 
 func TestFindLocalDirectoryAssignment(t *testing.T) {
@@ -844,6 +846,48 @@ func TestAcquireLocalDirectoryLockSkipsWorktreeMode(t *testing.T) {
 	if got := d.localPathLocks.Holder(assignment.RealPath); got != "" {
 		t.Fatalf("holder = %q, want empty: worktree mode must not lock the path", got)
 	}
+}
+
+func TestAcquireLocalDirectoryLockSerializesPersistentConversation(t *testing.T) {
+	const daemonID = "d-mine"
+	repo := createDaemonTestRepo(t)
+	raw, err := json.Marshal(localDirectoryRef{
+		LocalPath:     repo,
+		DaemonID:      daemonID,
+		ExecutionMode: localDirectoryModeWorktree,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	resources := []ProjectResourceData{{ID: "r1", ResourceType: localDirectoryResourceType, ResourceRef: raw}}
+	task := Task{
+		ID: "task-a", WorkspaceID: "workspace-a", AgentID: "agent-a", IssueID: "issue-a",
+		ProjectResources: resources,
+	}
+	d := &Daemon{
+		cfg: Config{
+			DaemonID:                 daemonID,
+			WorkspacesRoot:           t.TempDir(),
+			PersistentLocalWorktrees: true,
+		},
+		localPathLocks: NewLocalPathLocker(),
+		logger:         slog.Default(),
+	}
+
+	release, abort := d.acquireLocalDirectoryLockIfNeeded(context.Background(), task, slog.Default())
+	if abort || release == nil {
+		t.Fatalf("persistent acquisition: release=%v abort=%v", release != nil, abort)
+	}
+	entry, err := execenv.PersistentLocalWorktreeEntryPath(
+		d.cfg.WorkspacesRoot, repo, task.WorkspaceID, task.AgentID, string(execenv.GCKindIssue), task.IssueID,
+	)
+	if err != nil {
+		t.Fatalf("derive entry: %v", err)
+	}
+	if got := d.localPathLocks.Holder(entry); got != task.ID {
+		t.Fatalf("holder = %q, want %q", got, task.ID)
+	}
+	release()
 }
 
 // The default and any unrecognised mode must keep the historical exclusive

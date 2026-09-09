@@ -259,6 +259,37 @@ func TestRepoMaintenanceKillSwitchDefaultsOnAndCanDisable(t *testing.T) {
 	}
 }
 
+func TestPersistentLocalWorktreeConfig(t *testing.T) {
+	stageFakeAgent(t)
+	// This is a config test, not discovery of the host's login-shell agents.
+	t.Setenv("SHELL", "/usr/bin/fish")
+	pinNonCodexAgentsToMissingPaths(t)
+	t.Setenv("MULTICA_GC_PERSISTENT_WORKTREE_TTL", "36h")
+	for _, tc := range []struct {
+		lifecycle string
+		want      bool
+	}{{"", true}, {"conversation", true}, {"task", false}} {
+		t.Run("lifecycle="+tc.lifecycle, func(t *testing.T) {
+			t.Setenv("MULTICA_LOCAL_WORKTREE_LIFECYCLE", tc.lifecycle)
+			cfg, err := LoadConfig(Overrides{AllowNoAgents: true})
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if cfg.PersistentLocalWorktrees != tc.want {
+				t.Fatalf("PersistentLocalWorktrees = %v, want %v", cfg.PersistentLocalWorktrees, tc.want)
+			}
+			if cfg.GCPersistentLocalWorktreeTTL != 36*time.Hour {
+				t.Fatalf("GCPersistentLocalWorktreeTTL = %s, want 36h", cfg.GCPersistentLocalWorktreeTTL)
+			}
+		})
+	}
+
+	t.Setenv("MULTICA_LOCAL_WORKTREE_LIFECYCLE", "forever")
+	if _, err := LoadConfig(Overrides{AllowNoAgents: true}); err == nil || !strings.Contains(err.Error(), "MULTICA_LOCAL_WORKTREE_LIFECYCLE") {
+		t.Fatalf("invalid lifecycle error = %v", err)
+	}
+}
+
 func TestPatternsFromEnv_DropsSeparatorBearingEntries(t *testing.T) {
 	t.Setenv("MULTICA_GC_ARTIFACT_PATTERNS", "node_modules, .next ,foo/bar, ../etc, ,target")
 	got := patternsFromEnv("MULTICA_GC_ARTIFACT_PATTERNS", nil)

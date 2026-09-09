@@ -37,6 +37,7 @@ func (d *Daemon) gcLoop(ctx context.Context) {
 		"artifact_ttl", d.cfg.GCArtifactTTL,
 		"repo_ttl", d.cfg.GCRepoTTL,
 		"repo_maintenance_enabled", d.cfg.GCRepoMaintenanceEnabled,
+		"persistent_local_worktree_ttl", d.cfg.GCPersistentLocalWorktreeTTL,
 		"artifact_patterns", d.cfg.GCArtifactPatterns,
 		"managed_artifact_subpaths", execenv.ManagedReclaimableArtifactSubpaths(),
 	)
@@ -76,6 +77,7 @@ type gcStats struct {
 	repoCachesReclaimed           int            // bare repo caches under .repos evicted past their TTL
 	taskTempDirsReclaimed         int            // per-task temp dirs under the temp base reclaimed after their owning execution ended
 	taskRootIndexEntriesReclaimed int            // abandoned stable-root records and unpublished entries reclaimed past the orphan TTL
+	persistentWorktreesReclaimed  int            // conversation-scoped local_directory worktrees unregistered past their parent lifecycle TTL
 	bytesReclaimed                int64          // total bytes freed in this cycle
 	byPattern                     map[string]int // configured basename or managed path label -> reclaim count
 }
@@ -128,6 +130,11 @@ func (d *Daemon) runGC(ctx context.Context) {
 	}
 	stats.taskRootIndexEntriesReclaimed += rootRecordsRemoved
 
+	// Conversation-scoped local_directory worktrees deliberately live outside
+	// task env roots. Reconcile their parent lifecycle separately, and take the
+	// same per-conversation mutex task startup uses before unregistering one.
+	d.prunePersistentLocalWorktrees(ctx, stats)
+
 	// Prune stale worktree references from all bare repo caches, then evict the
 	// caches nothing needs anymore. These live outside any workspace directory
 	// and are never reclaimed by the task walk above.
@@ -173,7 +180,7 @@ func (d *Daemon) runGC(ctx context.Context) {
 		}
 	}
 
-	if stats.cleaned > 0 || stats.orphaned > 0 || stats.artifactDirs > 0 || stats.storesReclaimed > 0 || stats.hermesMemoryStoresReclaimed > 0 || stats.hermesSessionStoresReclaimed > 0 || stats.repoCachesReclaimed > 0 || stats.taskTempDirsReclaimed > 0 || stats.taskRootIndexEntriesReclaimed > 0 {
+	if stats.cleaned > 0 || stats.orphaned > 0 || stats.artifactDirs > 0 || stats.storesReclaimed > 0 || stats.hermesMemoryStoresReclaimed > 0 || stats.hermesSessionStoresReclaimed > 0 || stats.repoCachesReclaimed > 0 || stats.taskTempDirsReclaimed > 0 || stats.taskRootIndexEntriesReclaimed > 0 || stats.persistentWorktreesReclaimed > 0 {
 		d.logger.Info("gc: cycle complete",
 			"cleaned", stats.cleaned,
 			"orphaned", stats.orphaned,
@@ -186,10 +193,82 @@ func (d *Daemon) runGC(ctx context.Context) {
 			"repo_caches_reclaimed", stats.repoCachesReclaimed,
 			"task_temp_dirs_reclaimed", stats.taskTempDirsReclaimed,
 			"task_root_index_entries_reclaimed", stats.taskRootIndexEntriesReclaimed,
+			"persistent_local_worktrees_reclaimed", stats.persistentWorktreesReclaimed,
 			"bytes_reclaimed", stats.bytesReclaimed,
 			"by_pattern", stats.byPattern,
 		)
 	}
+}
+
+// prunePersistentLocalWorktrees unregisters persistent checkouts only after
+// their owning issue/chat reaches a reclaimable lifecycle state. LastUsedAt is
+// part of the deadline so a just-finished task is never collected merely
+// because its parent was already old when the run started.
+func (d *Daemon) prunePersistentLocalWorktrees(ctx context.Context, stats *gcStats) {
+	if d.cfg.GCPersistentLocalWorktreeTTL <= 0 || d.client == nil {
+		return
+	}
+	now := time.Now()
+	for _, record := range execenv.ListPersistentLocalWorktrees(d.cfg.WorkspacesRoot, d.logger) {
+		if ctx.Err() != nil {
+			return
+		}
+		eligible := false
+		switch record.ConversationKind {
+		case string(execenv.GCKindIssue):
+			status, err := d.client.GetIssueGCCheck(ctx, record.ConversationID)
+			if err != nil {
+				// An inaccessible issue might be deleted or merely hidden by a
+				// re-scoped token. Preserve the same orphan grace used for task
+				// roots rather than treating a 404 as immediate permission.
+				eligible = isAccessNotFound(err) && persistentWorktreePastDeadline(now, record.LastUsedAt, time.Time{}, d.cfg.GCOrphanTTL)
+			} else if status.Status == "done" || status.Status == "cancelled" {
+				eligible = persistentWorktreePastDeadline(now, record.LastUsedAt, status.UpdatedAt, d.cfg.GCPersistentLocalWorktreeTTL)
+			}
+		case string(execenv.GCKindChat):
+			status, err := d.client.GetChatSessionGCCheck(ctx, record.ConversationID)
+			if err != nil {
+				// Chat deletion is an explicit hard delete, so mirror task-env GC
+				// and reclaim it in this cycle.
+				eligible = isAccessNotFound(err)
+			} else if status.Status == "archived" {
+				eligible = persistentWorktreePastDeadline(now, record.LastUsedAt, status.UpdatedAt, d.cfg.GCPersistentLocalWorktreeTTL)
+			}
+		}
+		if !eligible {
+			continue
+		}
+
+		release, ok := d.localPathLocks.TryAcquire(record.EntryRoot, "gc:persistent-local-worktree")
+		if !ok {
+			continue
+		}
+		bytes := dirSize(record.EntryRoot)
+		err := execenv.RemovePersistentLocalWorktree(record, d.logger)
+		release()
+		if err != nil {
+			d.logger.Warn("gc: persistent local worktree cleanup failed",
+				"entry", record.EntryRoot,
+				"conversation_kind", record.ConversationKind,
+				"conversation_id", record.ConversationID,
+				"error", err,
+			)
+			continue
+		}
+		stats.persistentWorktreesReclaimed++
+		stats.bytesReclaimed += bytes
+	}
+}
+
+func persistentWorktreePastDeadline(now, lastUsedAt, parentUpdatedAt time.Time, ttl time.Duration) bool {
+	if ttl <= 0 || lastUsedAt.IsZero() {
+		return false
+	}
+	deadlineBase := lastUsedAt
+	if parentUpdatedAt.After(deadlineBase) {
+		deadlineBase = parentUpdatedAt
+	}
+	return now.Sub(deadlineBase) > ttl
 }
 
 // gcWorkspace scans task directories inside a single workspace directory.

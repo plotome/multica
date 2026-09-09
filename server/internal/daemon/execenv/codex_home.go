@@ -46,6 +46,9 @@ var codexModelsCacheConfigFiles = []string{
 // CodexHomeOptions carries optional inputs for prepareCodexHomeWithOpts that
 // affect the generated per-task config.toml.
 type CodexHomeOptions struct {
+	// ConversationHome keeps all provider-owned state in place, without the
+	// legacy sessions link/reset path. Requires the daemon's execution lease.
+	ConversationHome bool
 	// CodexVersion is the detected Codex CLI version (e.g. "0.121.0"). Empty
 	// means unknown; on macOS, unknown is treated as "probably broken" so the
 	// daemon falls back to danger-full-access for network access. See
@@ -196,6 +199,16 @@ func classifyPerTaskWindowsSandbox(configFile string, configSyncErr error, share
 // config files are copied (isolated). The per-task config.toml gets a
 // daemon-managed sandbox block picked by codexSandboxPolicyFor.
 func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *slog.Logger) error {
+	if opts.ConversationHome {
+		if err := validateLeasedCodexHome(codexHome); err != nil {
+			return err
+		}
+		// Snapshots capture an execution's environment, not conversation state.
+		// Never let a new task source the previous task's identity/credentials.
+		if err := os.RemoveAll(filepath.Join(codexHome, "shell_snapshots")); err != nil {
+			return err
+		}
+	}
 	sharedHome := resolveSharedCodexHome()
 	freshHome := false
 	if _, err := os.Lstat(codexHome); os.IsNotExist(err) {
@@ -210,6 +223,9 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
 	// shared ~/.codex/sessions in — a huge shared history would otherwise stall
 	// Codex's `initialize` state backfill (MUL-4424). See prepareCodexSessionsDir.
 	if err := prepareCodexSessionsDir(codexHome, sharedHome, opts, logger); err != nil {
+		if opts.ConversationHome {
+			return err
+		}
 		logger.Warn("execenv: codex-home sessions dir prepare failed", "error", err)
 	}
 
@@ -218,6 +234,9 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
 		src := filepath.Join(sharedHome, name)
 		dst := filepath.Join(codexHome, name)
 		if err := ensureSymlink(src, dst); err != nil {
+			if opts.ConversationHome {
+				return err
+			}
 			logger.Warn("execenv: codex-home symlink failed", "file", name, "error", err)
 		}
 	}
@@ -237,6 +256,9 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
 		src := filepath.Join(sharedHome, name)
 		dst := filepath.Join(codexHome, name)
 		if err := syncCopiedFile(src, dst); err != nil {
+			if opts.ConversationHome {
+				return err
+			}
 			logger.Warn("execenv: codex-home sync failed", "file", name, "error", err)
 			if name == "config.toml" {
 				configSyncErr = err
@@ -250,6 +272,9 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
 	// agent's active skills directly to `codex-home/skills/`, so the
 	// user-level registry is redundant here. See codex_skill_strip.go.
 	if err := sanitizeCopiedCodexConfig(filepath.Join(codexHome, "config.toml")); err != nil {
+		if opts.ConversationHome {
+			return err
+		}
 		logger.Warn("execenv: codex-home sanitize config failed", "error", err)
 	}
 
@@ -303,6 +328,9 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
 	// completion while spawned subagents are still running. See
 	// codex_multi_agent.go for the full rationale and escape hatch.
 	if err := ensureCodexMultiAgentConfig(filepath.Join(codexHome, "config.toml"), logger); err != nil {
+		if opts.ConversationHome {
+			return err
+		}
 		logger.Warn("execenv: codex-home ensure multi-agent config failed", "error", err)
 	}
 
@@ -311,6 +339,9 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
 	// happen via `codex-home/memories/` or `~/.codex/memories/`. See
 	// codex_memory.go for the full rationale and escape hatch.
 	if err := ensureCodexMemoryConfig(filepath.Join(codexHome, "config.toml"), logger); err != nil {
+		if opts.ConversationHome {
+			return err
+		}
 		logger.Warn("execenv: codex-home ensure memory config failed", "error", err)
 	}
 
@@ -568,6 +599,10 @@ func dirStat(dir string) (newest time.Time, size int64) {
 //     Codex rebuilds it from the scoped sessions.
 func prepareCodexSessionsDir(codexHome, sharedHome string, opts CodexHomeOptions, logger *slog.Logger) error {
 	dst := filepath.Join(codexHome, "sessions")
+	if opts.ConversationHome {
+		_, err := privateCodexChild(codexHome, "sessions")
+		return err
+	}
 	sharedSessions := filepath.Join(sharedHome, "sessions")
 	storeDir := codexSessionStoreDir(sharedHome, opts.SessionStoreKey)
 

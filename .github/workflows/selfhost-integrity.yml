@@ -31,5 +31,5 @@ jobs:
           ../scripts/go-test-with-agent-cli-guard.sh --
           go test -race -p 2 -parallel 2
           ./internal/daemon ./internal/daemon/execenv ./pkg/agent
-          -run 'Test(PersistentLocalWorktree|IsolatedPrepareReusesPersistentPhysicalWorktree|PrunePersistentLocalWorktrees|AcquireLocalDirectoryLockSerializesPersistentConversation|CodexStartOrResumeThread|CodexTurnNotificationGate|ConfigureCodexTaskShellEnvironment|CodexTaskShellEnvInheritsRealHome)'
+          -run 'Test(PersistentLocalWorktree|IsolatedPrepareReusesPersistentPhysicalWorktree|PrunePersistentLocalWorktrees|AcquireLocalDirectoryLockSerializesPersistentConversation|CodexStartOrResumeThread|CodexTurnNotificationGate|ConfigureCodexTaskShellEnvironment|CodexTaskShellEnvInheritsRealHome|CodexConversationHome|PruneCodexConversationHomes|PersistentCodexSkills|CodexPersistentHome|ExecuteAndDrainPersistentHome|RunTaskCodexPersistentHome)'
           -count=1 -timeout=5m

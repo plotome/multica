@@ -29,6 +29,30 @@
         "TestConfigureCodexTaskShellEnvironment",
         "TestCodexTaskShellEnvInheritsRealHome"
       ]
+    },
+    {
+      "id": "conversation-codex-homes",
+      "introduced_by": "2c772b6d6624ca1c7679de80a4a728321264be50",
+      "required_files": [
+        "server/internal/daemon/execenv/codex_conversation_home.go",
+        "server/internal/daemon/execenv/codex_persistent_skills.go",
+        "docs/codex-conversation-state.md"
+      ],
+      "required_tests": [
+        "TestRunTaskCodexPersistentHomeTwoTurns",
+        "TestExecuteAndDrainPersistentHomeCancellationWaitsForCleanup",
+        "TestCodexConversationHomePreparationHelperTwoTurns",
+        "TestCodexConversationHomeInvalidConfigFailsClosed",
+        "TestCodexConversationHomeContinuityAndReset",
+        "TestCodexConversationHomeIsolationAndLegacy",
+        "TestCodexConversationHomeUncleanAndMissingFailClosed",
+        "TestPruneCodexConversationHomes",
+        "TestCodexConversationHomeRejectsLinkedState",
+        "TestPersistentCodexSkillsReconcileAndPreserveNative",
+        "TestCodexPersistentHomePreLaunchFailureNeedsNoRecovery",
+        "TestCodexPersistentHomeNeverFallsBackFromResume",
+        "TestCodexPersistentHomeReportsProcessCleanup"
+      ]
     }
   ]
 }

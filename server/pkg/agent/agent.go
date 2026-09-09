@@ -72,6 +72,9 @@ type ExecOptions struct {
 	// the backend surfaces a continuity notice instead of silently
 	// restarting. Currently honoured by the codex backend (MUL-4424).
 	ResumeExpected bool
+	// PersistentCodexHome requires exact resume and confirmed process cleanup
+	// before another execution may mutate the same home. Internal daemon option.
+	PersistentCodexHome bool
 	// ResumeContinuityNotice is the text to prepend to the first turn when
 	// ResumeExpected holds but the backend lands on a fresh thread anyway. The
 	// caller owns the wording because only it knows what the surface lost — an
@@ -199,12 +202,16 @@ const CostUSDTicksPerUSD = 10_000_000_000
 
 // Result is the final outcome after an agent session completes.
 type Result struct {
-	Status     string // "completed", "failed", "aborted", "timeout", "cancelled"
-	Output     string // final user-facing output selected by the backend
-	Error      string // error message if failed
-	DurationMs int64
-	SessionID  string
-	Usage      map[string]TokenUsage // keyed by model name
+	// ProcessCleanupConfirmed is positive provider evidence that the execution
+	// process tree has been reaped. Unknown/absent evidence is false. This is
+	// local lifecycle plumbing, not part of the server's result API.
+	ProcessCleanupConfirmed bool   `json:"-"`
+	Status                  string // "completed", "failed", "aborted", "timeout", "cancelled"
+	Output                  string // final user-facing output selected by the backend
+	Error                   string // error message if failed
+	DurationMs              int64
+	SessionID               string
+	Usage                   map[string]TokenUsage // keyed by model name
 	// ResumeRejected is positive evidence that this run's requested resume
 	// was permanently refused — the transcript is gone, the session belongs to
 	// another provider account, OR the session still exists but its history

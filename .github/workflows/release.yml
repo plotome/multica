@@ -110,6 +110,31 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
+  release-fork:
+    needs: verify
+    if: github.repository == 'plotome/multica'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: server/go.sum
+      - name: Verify retained selfhost patches
+        run: python3 scripts/check-selfhost-patches.py
+      - name: Prepare fork-only release configuration
+        # Reuse upstream archives/checksums, but never write its Homebrew tap.
+        # Keep generated configuration outside the checkout (GoReleaser requires clean Git).
+        run: sed '/^brews:/,$d' .goreleaser.yml > "$RUNNER_TEMP/goreleaser-fork.yml"
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean --config ${{ runner.temp }}/goreleaser-fork.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # Multi-arch images are built natively per platform on dedicated runners
   # (amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm) and merged into a
   # manifest list. This avoids QEMU emulation, which was making the Next.js

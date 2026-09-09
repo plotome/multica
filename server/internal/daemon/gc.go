@@ -147,6 +147,10 @@ func (d *Daemon) runGC(ctx context.Context) {
 		stats.storesReclaimed += storesRemoved
 		stats.bytesReclaimed += storeBytes
 	}
+	if homesRemoved, homeBytes := execenv.PruneCodexConversationHomes(d.cfg.Profile, d.cfg.GCCodexSessionTTL, time.Now(), d.logger); homesRemoved > 0 {
+		stats.storesReclaimed += homesRemoved
+		stats.bytesReclaimed += homeBytes
+	}
 
 	// Same for per-agent Hermes memory stores: they outlive the task by design
 	// (that is what fixes #6638), so a deleted agent's memory needs its own

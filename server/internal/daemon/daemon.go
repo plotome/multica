@@ -7670,6 +7670,32 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			defer d.unmarkActiveStore(store)
 		}
 	}
+	// The preparation helper is short-lived, so its locks cannot protect a
+	// shared home during execution. Hold the conversation lease here instead.
+	// Windows provider descendant cleanup is not yet guaranteed; retain its
+	// existing task-local homes until that execution boundary is implemented.
+	var codexHomeLease *execenv.CodexConversationHomeLease
+	codexHomeSafeToRelease := true // preparation has not launched a provider yet
+	if provider == "codex" && runtime.GOOS != "windows" {
+		var err error
+		codexHomeLease, err = execenv.ClaimCodexConversationHome(execenv.CodexConversationHomeParams{
+			Profile: d.cfg.Profile, WorkspaceID: task.WorkspaceID, TaskID: task.ID,
+			ResumeSessionID: task.PriorSessionID, Task: taskCtx,
+		})
+		if err != nil {
+			return TaskResult{}, asEnvironmentSetupFailure(fmt.Errorf("claim Codex conversation home: %w", err))
+		}
+		defer func() {
+			if codexHomeSafeToRelease {
+				codexHomeLease.Release()
+			} else {
+				codexHomeLease.Quarantine()
+			}
+		}()
+		if codexHomeLease != nil {
+			taskLog.Info("using leased conversation Codex home", "codex_home", codexHomeLease.Home())
+		}
+	}
 	envReused := false
 	priorClaim, priorWorkDir, lockedPriorInfo, reusable, reuseErr := d.lockReusablePriorEnvRoot(ctx, task, localAssignment, envClaim.RootDir())
 	if reuseErr != nil {
@@ -7698,6 +7724,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			Provider:              provider,
 			CodexVersion:          codexVersion,
 			ResumeSessionID:       task.PriorSessionID,
+			CodexConversationHome: codexHomeLease.Home(),
 			OpenclawBin:           openclawBin,
 			McpConfig:             effectiveMcpConfig,
 			CursorMcpAuthSource:   cursorMcpAuthSource,
@@ -7749,6 +7776,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			Provider:              provider,
 			CodexVersion:          codexVersion,
 			OpenclawBin:           openclawBin,
+			CodexConversationHome: codexHomeLease.Home(),
 			McpConfig:             effectiveMcpConfig,
 			CursorMcpAuthSource:   cursorMcpAuthSource,
 			OpenclawGateway:       openclawGateway,
@@ -8011,6 +8039,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// agent.Config.BuiltinRuntime: it separates the provider's own discovered
 	// binary from an arbitrary command speaking its protocol. Reused here so
 	// the gate and the backend cannot disagree about which one is running.
+	if codexHomeLease != nil && task.PriorSessionID != "" {
+		if !sameExistingDir(env.WorkDir, task.PriorWorkDir) || !execenv.CodexResumeRolloutPresent(env.CodexHome, task.PriorSessionID) {
+			return TaskResult{}, asEnvironmentSetupFailure(errors.New("persisted Codex session workdir or rollout is unavailable; restore its cold backup or explicitly start a fresh session"))
+		}
+	}
 	resumeReachable := gateResumeToReachableSession(
 		&task, &taskCtx, provider, env.WorkDir,
 		sessionHomeReachable(provider, env, envReused),
@@ -8269,6 +8302,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		HandshakeTimeout:           d.cfg.CodexHandshakeTimeout,
 		ThreadHandshakeTimeout:     d.cfg.CodexThreadHandshakeTimeout,
 		ResumeSessionID:            task.PriorSessionID,
+		PersistentCodexHome:        codexHomeLease != nil,
 		// Post-gate intent: PriorSessionID here already reflects the pre-flight
 		// resume gates (a dropped resume is surfaced via the prompt instead). If it
 		// survived to here, the backend must disclose the loss when the live
@@ -8362,7 +8396,16 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// Shared across the resume-retry below so the retry's transcript rows
 	// keep ascending seq values for the same task.
 	var msgSeq atomic.Int32
-	result, tools, err := d.executeAndDrain(ctx, backend, prompt, execOpts, taskLog, task.ID, env.CodexHome, &msgSeq)
+	if codexHomeLease != nil {
+		codexHomeSafeToRelease = false
+	}
+	result, tools, err := d.executeAndDrain(ctx, backend, prompt, execOpts, taskLog, task.ID, env.CodexHome, &msgSeq, codexHomeLease)
+	if codexHomeLease != nil {
+		codexHomeSafeToRelease = result.ProcessCleanupConfirmed
+		if !codexHomeSafeToRelease {
+			taskLog.Error("Codex process cleanup unconfirmed; conversation home quarantined", "codex_home", codexHomeLease.Home())
+		}
+	}
 	if err != nil {
 		return TaskResult{}, err
 	}
@@ -8376,7 +8419,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	var retiredSessionID string
 	defer func() { taskResult.RetiredSessionID = retiredSessionID }()
 
-	if shouldRetryWithFreshSession(result, task.PriorSessionID, tools, provider) {
+	if codexHomeLease == nil && shouldRetryWithFreshSession(result, task.PriorSessionID, tools, provider) {
 		firstResult := result
 		firstUsage := result.Usage
 		firstTools := tools
@@ -8488,6 +8531,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// returns (SessionID is already blanked above); reportTaskResult forwards it
 	// as session_rollout_missing on the terminal callback (MUL-5305).
 	defer func() { taskResult.SessionRolloutMissing = sessionRolloutMissing }()
+	if codexHomeLease != nil && result.SessionID != "" {
+		if err := codexHomeLease.BindSession(result.SessionID); err != nil {
+			taskLog.Error("cannot persist Codex home binding; withholding resume pointer", "error", err)
+			result.SessionID = ""
+			sessionRolloutMissing = true
+		}
+	}
 
 	switch result.Status {
 	case "completed":
@@ -8872,7 +8922,11 @@ func freshSessionMayHelp(errText string) bool {
 // messages and is owned by the caller so a same-task retry continues the
 // sequence instead of restarting at 1 — the server orders the transcript by
 // seq alone, and duplicate seqs would interleave the two attempts' rows.
-func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, prompt string, opts agent.ExecOptions, taskLog *slog.Logger, taskID, codexHome string, msgSeq *atomic.Int32) (agent.Result, int32, error) {
+func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, prompt string, opts agent.ExecOptions, taskLog *slog.Logger, taskID, codexHome string, msgSeq *atomic.Int32, homeLeases ...*execenv.CodexConversationHomeLease) (agent.Result, int32, error) {
+	var homeLease *execenv.CodexConversationHomeLease
+	if len(homeLeases) > 0 {
+		homeLease = homeLeases[0]
+	}
 	// Wrap the caller's ctx so the idle watchdog (below) can interrupt both
 	// the agent subprocess (via the ctx passed to backend.Execute) AND the
 	// drain loop with a single cancel. Without this layer the backend would
@@ -8883,13 +8937,14 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 
 	session, err := backend.Execute(agentCtx, prompt, opts)
 	if err != nil {
+		cleanupConfirmed := opts.PersistentCodexHome && agent.CodexProcessNeverStarted(err)
 		// One provider-agnostic boundary for launches: every backend's
 		// cmd.Start() failure arrives here, so diagnosing ENOEXEC at this point
 		// covers claude, opencode and any CLI added later without a wrap in
 		// each backend (MUL-6164).
 		err = agent.ExplainExecError(err)
 		taskLog.Debug("backend execute returned error", "error", err)
-		return agent.Result{}, 0, err
+		return agent.Result{ProcessCleanupConfirmed: cleanupConfirmed}, 0, err
 	}
 	// This counter intentionally starts at the narrower provider-session
 	// boundary, not at the earlier server-side StartTask transition.
@@ -9050,6 +9105,12 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 									"session_id", sid, "codex_home", codexHome)
 								return
 							}
+							if homeLease != nil {
+								if err := homeLease.BindSession(sid); err != nil {
+									taskLog.Error("skip session pin: Codex home binding failed", "error", err)
+									return
+								}
+							}
 							pinCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 							defer cancel()
 							if err := d.client.PinTaskSession(pinCtx, taskID, sid, wd); err != nil {
@@ -9200,14 +9261,26 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 		// hand back (and let runTask fail-and-broadcast) a still-flushing
 		// transcript either.
 		waitForDrain()
+		// A cancelled drain is not evidence that the process tree exited. For
+		// persistent homes collect the provider's bounded cleanup result before
+		// deciding whether the next run may reuse its writable state.
+		cleanupConfirmed := false
+		if opts.PersistentCodexHome {
+			select {
+			case reaped, ok := <-session.Result:
+				cleanupConfirmed = ok && reaped.ProcessCleanupConfirmed
+			case <-time.After(30 * time.Second):
+			}
+		}
 		// Idle watchdog cancels via agentCancel(), which propagates here as
 		// context.Canceled. Check this BEFORE the generic cancelled/timeout
 		// classifiers so a watchdog-induced stop isn't misreported as
 		// "task cancelled by server".
 		if idleWatchdogFired.Load() {
 			return agent.Result{
-				Status: "idle_watchdog",
-				Error:  idleWatchdogReason(time.Duration(idleWatchdogThreshold.Load())),
+				Status:                  "idle_watchdog",
+				Error:                   idleWatchdogReason(time.Duration(idleWatchdogThreshold.Load())),
+				ProcessCleanupConfirmed: cleanupConfirmed,
 			}, toolCount.Load(), nil
 		}
 		// Distinguish external cancellation (e.g. server-initiated cancel
@@ -9217,13 +9290,15 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 		// drain deadline expiring on its own.
 		if errors.Is(drainCtx.Err(), context.Canceled) {
 			return agent.Result{
-				Status: "cancelled",
-				Error:  "task cancelled by upstream context (server cancel or daemon shutdown)",
+				Status:                  "cancelled",
+				Error:                   "task cancelled by upstream context (server cancel or daemon shutdown)",
+				ProcessCleanupConfirmed: cleanupConfirmed,
 			}, toolCount.Load(), nil
 		}
 		return agent.Result{
-			Status: "timeout",
-			Error:  "agent did not produce result within drain timeout",
+			Status:                  "timeout",
+			Error:                   "agent did not produce result within drain timeout",
+			ProcessCleanupConfirmed: cleanupConfirmed,
 		}, toolCount.Load(), nil
 	}
 }

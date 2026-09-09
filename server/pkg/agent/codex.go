@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -918,7 +919,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 				var err error
 				session, err = b.executeOnce(ctx, prompt, attemptOpts, attempt)
 				if err != nil {
-					resCh <- Result{Status: "failed", Error: err.Error()}
+					resCh <- Result{Status: "failed", Error: err.Error(), ProcessCleanupConfirmed: CodexProcessNeverStarted(err)}
 					return
 				}
 			}
@@ -961,7 +962,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			case result.codexStartupRefreshRetrySafe:
 				retryReason = "model_catalog_refresh"
 			}
-			if retryReason == "" || attempt == 2 {
+			if retryReason == "" || attempt == 2 || (opts.PersistentCodexHome && opts.ResumeSessionID != "") {
 				flushHeldPins()
 				resCh <- result
 				return
@@ -1001,7 +1002,27 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 	return &Session{Messages: msgCh, Result: resCh}, nil
 }
 
-func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts ExecOptions, attempt int) (*Session, error) {
+type codexPreLaunchError struct{ err error }
+
+func (e *codexPreLaunchError) Error() string { return e.err.Error() }
+func (e *codexPreLaunchError) Unwrap() error { return e.err }
+
+// CodexProcessNeverStarted distinguishes safe-to-retry configuration/exec
+// failures from an unknown cleanup outcome. No subprocess existed on this path.
+func CodexProcessNeverStarted(err error) bool {
+	var before *codexPreLaunchError
+	return errors.As(err, &before)
+}
+
+func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts ExecOptions, attempt int) (_ *Session, launchErr error) {
+	started := false
+	defer func() {
+		// On Unix startOwnedProcessTree is cmd.Start: an error means no child
+		// was launched. Windows can fail after creating a suspended child.
+		if launchErr != nil && !started && runtime.GOOS != "windows" {
+			launchErr = &codexPreLaunchError{launchErr}
+		}
+	}()
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "codex"
@@ -1137,6 +1158,7 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 		cancel()
 		return nil, fmt.Errorf("start codex: %w", err)
 	}
+	started = true
 	activeLaunches := activeCodexLaunches.Add(1)
 	for {
 		maxSeen := maxActiveCodexLaunchesObserved.Load()
@@ -1452,7 +1474,7 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 				finalError += "; retry suppressed: process-tree cleanup cannot be confirmed on this platform"
 			}
 			b.cfg.Logger.Warn("codex lifecycle", "phase", "initialize_failure", "task_id", b.cfg.TaskID, "runtime_id", b.cfg.RuntimeID, "pid", cmd.Process.Pid, "attempt", attempt, "latency", initializeLatency.Round(time.Millisecond).String(), "semantic_activity", semanticObserved.Load(), "cleanup_confirmed", cleanupConfirmed, "retry_safe", retrySafe)
-			resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), codexInitializeRetrySafe: retrySafe}
+			resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), codexInitializeRetrySafe: retrySafe, ProcessCleanupConfirmed: cleanupConfirmed}
 			return
 		}
 		b.cfg.Logger.Info("codex lifecycle", "phase", "initialize_response", "task_id", b.cfg.TaskID, "runtime_id", b.cfg.RuntimeID, "pid", cmd.Process.Pid, "attempt", attempt, "latency", time.Since(initializeStarted).Round(time.Millisecond).String())
@@ -1498,10 +1520,11 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 				)
 			}
 			resCh <- Result{
-				Status:         finalStatus,
-				Error:          finalError,
-				DurationMs:     time.Since(startTime).Milliseconds(),
-				ResumeRejected: isCodexResumeOverflow(opts, err),
+				Status:                  finalStatus,
+				Error:                   finalError,
+				DurationMs:              time.Since(startTime).Milliseconds(),
+				ResumeRejected:          isCodexResumeOverflow(opts, err),
+				ProcessCleanupConfirmed: cleanupConfirmed,
 			}
 			return
 		}
@@ -1575,7 +1598,7 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 				drainAndWait() // flush os/exec stderr goroutine before sampling Tail
 				finalStatus = "failed"
 				finalError = withAgentStderr(fmt.Sprintf("codex turn/start failed: %v", err), "codex", sanitizeCodexDiagnostic(stderrBuf.Tail()))
-				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
+				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ProcessCleanupConfirmed: cleanupConfirmed}
 				return
 			}
 		}
@@ -1821,6 +1844,7 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 			DurationMs:                   duration.Milliseconds(),
 			Usage:                        usageMap,
 			codexStartupRefreshRetrySafe: startupRefreshRetrySafe,
+			ProcessCleanupConfirmed:      cleanupConfirmed,
 		}
 	}()
 
@@ -1913,6 +1937,9 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		resumeResult, err := c.request(ctx, "thread/resume", resumeParams)
 		if err == nil {
 			if threadID := extractThreadID(resumeResult); threadID != "" {
+				if opts.PersistentCodexHome && threadID != priorThreadID {
+					return "", false, fmt.Errorf("codex resumed an unexpected thread; refusing persistent home reuse")
+				}
 				logger.Info("codex lifecycle",
 					"phase", "thread_resume_response",
 					"task_id", c.cfg.TaskID,
@@ -1926,8 +1953,14 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 				)
 				return threadID, true, nil
 			}
+			if opts.PersistentCodexHome {
+				return "", false, fmt.Errorf("codex thread/resume returned no thread ID; refusing to reset persistent state")
+			}
 			logger.Warn("codex thread/resume returned no thread ID; falling back to thread/start", "prior_thread_id", priorThreadID)
 		} else {
+			if opts.PersistentCodexHome {
+				return "", false, fmt.Errorf("codex thread/resume failed; persistent state preserved: %w", err)
+			}
 			if isCodexTransportError(err) {
 				logger.Warn("codex thread/resume failed due to transport error; not falling back to thread/start", "prior_thread_id", priorThreadID, "error", err)
 				return "", false, fmt.Errorf("codex thread/resume failed: %w", err)

@@ -79,9 +79,17 @@ type LocalWorktreeParams struct {
 	// or any subdirectory of it; the worktree always covers the whole repo,
 	// and the agent's cwd is the matching subdirectory inside it.
 	LocalPath string
-	// EnvRoot is the daemon-owned task env root. The worktree is created
-	// inside it so the ordinary env-root GC reclaims it.
+	// EnvRoot is the daemon-owned task env root. Task-scoped worktrees are
+	// created inside it; persistent ones use PersistentRoot instead.
 	EnvRoot string
+	// PersistentRoot is the daemon workspaces root when this conversation owns
+	// a stable physical worktree. Empty preserves the historical task-scoped
+	// lifecycle. Persistence is only applied when the conversation owner below
+	// is complete; one-shot tasks remain disposable.
+	PersistentRoot string
+	// Provider names the runtime config marker that must be removed before a
+	// persistent checkout is checkpointed after a crash.
+	Provider string
 	// AgentName and TaskID name the branch a task with no conversation behind
 	// it gets: agent/<name>/<short-task-id>.
 	AgentName string
@@ -103,9 +111,10 @@ type LocalWorktreeParams struct {
 	// later task continues it, so a same-named branch belonging to the user,
 	// to another agent, or to another workspace is never adopted. All three
 	// empty means "no conversation": the task gets a task-scoped branch.
-	WorkspaceID    string
-	AgentID        string
-	ConversationID string
+	WorkspaceID      string
+	AgentID          string
+	ConversationID   string
+	ConversationKind string
 }
 
 // owner is the identity a branch created for this task is recorded under.
@@ -176,6 +185,13 @@ type LocalWorktree struct {
 	// version is right — so this is what the turn's prompt tells it to fix.
 	// Finalize refuses to deliver while any of them are still unmerged.
 	ReplayConflicts []string
+	// Persistent keeps this checkout registered after Finalize. Its task env
+	// root still remains disposable; only Path / WorkDir live in the separate
+	// daemon registry named by PersistentEntryRoot.
+	Persistent                 bool
+	PersistentEntryRoot        string
+	PersistentConversationKind string
+	PersistentProvider         string
 	// createdBranch records that this prepare put the branch where it is, so
 	// dropping it discards nothing an earlier turn delivered. False for a
 	// continued branch: that one has to survive even a turn that produced
@@ -320,7 +336,18 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 		return nil, fmt.Errorf("execenv: %q is not inside its repository root %q", localPath, gitRoot)
 	}
 
+	persistent := params.PersistentRoot != "" && params.owner().valid()
+	persistentEntryRoot := ""
 	worktreePath := filepath.Join(params.EnvRoot, localWorktreeDirName)
+	if persistent {
+		persistentEntryRoot, err = PersistentLocalWorktreeEntryPath(
+			params.PersistentRoot, params.LocalPath, params.WorkspaceID, params.AgentID, params.ConversationKind, params.ConversationID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		worktreePath = persistentLocalWorktreePath(persistentEntryRoot)
+	}
 
 	// Everything below mutates the repo's worktree admin state or its refs, so
 	// take the per-repo lock first. It covers the stale-path cleanup, which runs
@@ -334,11 +361,58 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 	}
 	defer unlock()
 
-	if _, statErr := os.Stat(worktreePath); statErr == nil {
+	existingPersistent := false
+	var existingUnmerged []string
+	if _, statErr := os.Stat(worktreePath); statErr == nil && persistent {
+		record, recordErr := readPersistentLocalWorktreeRecord(persistentEntryRoot)
+		if recordErr != nil {
+			return nil, fmt.Errorf("execenv: open persistent local worktree: %w", recordErr)
+		}
+		wantWorkDir := filepath.Join(worktreePath, rel)
+		if record.WorkspaceID != params.WorkspaceID || record.AgentID != params.AgentID ||
+			record.ConversationID != params.ConversationID || record.ConversationKind != params.ConversationKind ||
+			record.GitRoot != gitRoot || record.WorktreePath != worktreePath || record.WorkDir != wantWorkDir {
+			return nil, errors.New("execenv: persistent local worktree identity does not match this conversation")
+		}
+		branch, branchErr := runGitTrimmed(worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
+		if branchErr != nil || branch != record.Branch {
+			return nil, fmt.Errorf("execenv: persistent local worktree branch is %q, expected %q", branch, record.Branch)
+		}
+		if err := cleanupPersistentLocalWorktreeArtifacts(persistentEntryRoot, wantWorkDir, record.Provider); err != nil {
+			return nil, fmt.Errorf("execenv: clean artifacts from interrupted persistent local worktree task: %w", err)
+		}
+		existingUnmerged, err = unmergedPaths(worktreePath)
+		if err != nil {
+			return nil, fmt.Errorf("execenv: inspect persistent local worktree merge state: %w", err)
+		}
+		if len(existingUnmerged) == 0 {
+			dirty, dirtyErr := worktreeIsDirty(worktreePath)
+			if dirtyErr != nil {
+				return nil, dirtyErr
+			}
+			if dirty {
+				if _, commitErr := commitEverything(worktreePath, "chore(agent): recovered changes from interrupted task", false); commitErr != nil {
+					return nil, fmt.Errorf("execenv: checkpoint interrupted persistent worktree: %w", commitErr)
+				}
+			}
+		}
+		existingPersistent = true
+	} else if statErr == nil {
 		// Prepare wipes and recreates envRoot, so an existing worktree path
 		// means a stale registration in the user's repo pointing here. Remove
 		// both rather than failing the task.
 		removeLocalWorktreeDir(gitRoot, worktreePath, logger)
+	} else if persistent && !errors.Is(statErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("execenv: inspect persistent local worktree: %w", statErr)
+	} else if persistent {
+		// A state record without its checkout is a crash leftover. The branch is
+		// still protected by its ownership ref; discard only the daemon record,
+		// prune the stale Git registration below, and materialise it again.
+		if _, stateErr := os.Stat(filepath.Join(persistentEntryRoot, persistentLocalWorktreeStateFile)); stateErr == nil {
+			if removeErr := os.RemoveAll(persistentEntryRoot); removeErr != nil {
+				return nil, fmt.Errorf("execenv: clear stale persistent worktree record: %w", removeErr)
+			}
+		}
 	}
 
 	// Self-heal registrations orphaned by a crashed daemon: their env roots are
@@ -379,22 +453,48 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 	}
 
 	plan := resolveTaskBranch(gitRoot, params, headSHA, logger)
-	actualBranch, createdBranch, err := addLocalWorktree(gitRoot, worktreePath, plan, params.TaskID)
-	if err != nil {
-		return nil, err
+	actualBranch := plan.name
+	createdBranch := false
+	if existingPersistent {
+		branch, branchErr := runGitTrimmed(worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
+		if branchErr != nil || branch != plan.name || (!plan.continues && !plan.reset) {
+			return nil, fmt.Errorf("execenv: persistent local worktree no longer matches conversation branch %q", plan.name)
+		}
+		if plan.reset {
+			if out, resetErr := runGit(worktreePath, "reset", "--hard", plan.base); resetErr != nil {
+				return nil, fmt.Errorf("execenv: reset merged persistent conversation branch: %s: %w", strings.TrimSpace(out), resetErr)
+			}
+		}
+	} else {
+		if persistent {
+			if err := os.MkdirAll(persistentEntryRoot, 0o700); err != nil {
+				return nil, fmt.Errorf("execenv: create persistent local worktree entry: %w", err)
+			}
+		}
+		actualBranch, createdBranch, err = addLocalWorktree(gitRoot, worktreePath, plan, params.TaskID)
+		if err != nil {
+			if persistent {
+				_ = os.RemoveAll(persistentEntryRoot)
+			}
+			return nil, err
+		}
 	}
 
 	wt := &LocalWorktree{
-		GitRoot:       gitRoot,
-		Path:          worktreePath,
-		WorkDir:       filepath.Join(worktreePath, rel),
-		Branch:        actualBranch,
-		BaseCommit:    plan.base,
-		Continued:     plan.continues,
-		createdBranch: createdBranch,
-		userState:     userState,
-		priorState:    plan.priorState,
-		owner:         plan.owner,
+		GitRoot:                    gitRoot,
+		Path:                       worktreePath,
+		WorkDir:                    filepath.Join(worktreePath, rel),
+		Branch:                     actualBranch,
+		BaseCommit:                 plan.base,
+		Continued:                  plan.continues || existingPersistent,
+		Persistent:                 persistent,
+		PersistentEntryRoot:        persistentEntryRoot,
+		PersistentConversationKind: params.ConversationKind,
+		PersistentProvider:         params.Provider,
+		createdBranch:              createdBranch,
+		userState:                  userState,
+		priorState:                 plan.priorState,
+		owner:                      plan.owner,
 		// A branch a sibling task forked because the conversation's own branch
 		// was busy is delivered once and never continued, so it records nothing.
 		tracksState: plan.tracksState && actualBranch == plan.name,
@@ -408,10 +508,26 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 	// it because THIS turn could not start would destroy the very thing the
 	// task was meant to build on.
 	rollback := func() {
+		if existingPersistent {
+			return
+		}
 		removeLocalWorktreeDir(gitRoot, worktreePath, logger)
 		if createdBranch {
 			dropBranch(gitRoot, actualBranch, logger)
 		}
+		if persistent {
+			_ = os.RemoveAll(persistentEntryRoot)
+		}
+	}
+
+	if len(existingUnmerged) > 0 {
+		wt.ReplayConflicts = existingUnmerged
+		wt.snapshotPending = true
+		wt.userState = plan.priorState
+		if err := wt.persistRecord(); err != nil {
+			return nil, fmt.Errorf("execenv: refresh persistent local worktree record: %w", err)
+		}
+		return wt, nil
 	}
 
 	// Replay the user's directory into the worktree.
@@ -502,6 +618,10 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 			"replay_conflicts", len(wt.ReplayConflicts),
 		)
 	}
+	if err := wt.persistRecord(); err != nil {
+		rollback()
+		return nil, fmt.Errorf("execenv: record persistent local worktree: %w", err)
+	}
 	return wt, nil
 }
 
@@ -557,6 +677,18 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		return outcome, fmt.Errorf(
 			"refusing to deliver branch %s: %w; the task worktree is preserved at %s (listed by `git worktree list` in %s)",
 			w.Branch, w.aborted, w.Path, w.GitRoot)
+	}
+
+	// The daemon normally removes these immediately before Finalize. Keep the
+	// worktree self-contained as well: direct callers and crash-recovery paths
+	// must never checkpoint task prompts, skill sidecars, or managed runtime
+	// config onto the delivered branch.
+	if w.Persistent {
+		if cleanupErr := cleanupPersistentLocalWorktreeArtifacts(w.PersistentEntryRoot, w.WorkDir, w.PersistentProvider); cleanupErr != nil {
+			outcome.Branch = ""
+			outcome.PreservedPath = w.Path
+			return outcome, fmt.Errorf("could not remove persistent worktree runtime artifacts: %w; the worktree remains at %s", cleanupErr, w.Path)
+		}
 	}
 
 	// An unresolved merge is never committed. The worktree may be carrying the
@@ -617,7 +749,7 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 	// would take their work with it.
 	tip, err := runGitTrimmed(w.Path, "rev-parse", "--verify", "HEAD")
 	producedWork := err != nil || tip != w.BaseCommit
-	dropped := !producedWork && w.createdBranch
+	dropped := !w.Persistent && !producedWork && w.createdBranch
 
 	// A turn that started mid-merge only gets to advance the branch's recorded
 	// state if it committed something after resolving. When the branch is still
@@ -680,6 +812,23 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		}
 	}
 
+	if w.Persistent {
+		if err := w.persistRecord(); err != nil {
+			outcome.PreservedPath = w.Path
+			return outcome, fmt.Errorf("could not refresh persistent worktree record for branch %s: %w; the worktree remains at %s", w.Branch, err, w.Path)
+		}
+		if logger != nil {
+			logger.Info("execenv: persistent local worktree checkpointed",
+				"git_root", w.GitRoot,
+				"path", w.Path,
+				"branch", w.Branch,
+				"auto_committed", outcome.AutoCommitted,
+				"produced_work", producedWork,
+			)
+		}
+		return outcome, nil
+	}
+
 	if removeErr := removeLocalWorktreeDir(w.GitRoot, w.Path, logger); removeErr != nil {
 		outcome.PreservedPath = w.Path
 		return outcome, fmt.Errorf(
@@ -731,6 +880,9 @@ func (w *LocalWorktree) Discard(logger *slog.Logger) {
 	// belongs to the turns before it and outlives this task.
 	if w.createdBranch {
 		dropBranch(w.GitRoot, w.Branch, logger)
+	}
+	if w.PersistentEntryRoot != "" {
+		_ = os.RemoveAll(w.PersistentEntryRoot)
 	}
 	if logger != nil {
 		logger.Info("execenv: local worktree discarded before the agent ran",

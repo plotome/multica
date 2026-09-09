@@ -76,6 +76,7 @@ const (
 	DefaultGCCodexSessionTTL              = 14 * 24 * time.Hour // 14 days — reclaim per-issue Codex session stores untouched this long
 	DefaultGCHermesMemoryTTL              = 90 * 24 * time.Hour // 90 days — reclaim per-agent Hermes memory stores untouched this long (long: reclaiming these is visible amnesia, and they are a few markdown files)
 	DefaultGCHermesSessionTTL             = 14 * 24 * time.Hour // 14 days — reclaim per-conversation Hermes session stores untouched this long (matches Codex: these hold transcripts, and losing an idle one restarts the thread rather than the agent's notes)
+	DefaultGCPersistentLocalWorktreeTTL   = 14 * 24 * time.Hour // 14 days — retain terminal issue / archived chat worktrees before unregistering them
 	DefaultGCRepoTTL                      = 30 * 24 * time.Hour // 30 days — evict a bare repo cache no task has checked out this long
 	// DefaultGCTaskTempLegacyTTL is 0 — disabled. Per-task temp dirs left by a
 	// daemon predating the temp dir execution lock carry no liveness signal at
@@ -124,10 +125,12 @@ type Config struct {
 	GCCodexSessionTTL              time.Duration         // reclaim a per-issue Codex session store (~/.codex/multica-sessions/<agent>/<issue>) untouched for at least this long, so a done/abandoned issue's conversation history does not accumulate forever (default: 14d, set 0 to disable)
 	GCHermesMemoryTTL              time.Duration         // reclaim a per-agent Hermes memory store (<profile dir>/hermes-state/<agent>/<profile>) untouched for at least this long, so a deleted agent's memory does not sit on disk forever (default: 90d, set 0 to disable)
 	GCHermesSessionTTL             time.Duration         // reclaim a per-conversation Hermes session store (<profile dir>/hermes-sessions/<agent>/<profile>/<conversation>) untouched for at least this long, so a done or abandoned conversation's transcript does not accumulate forever (default: 14d, set 0 to disable)
+	GCPersistentLocalWorktreeTTL   time.Duration         // unregister persistent local worktrees after their issue is terminal or chat is archived for this long (default: 14d, set 0 to disable)
 	GCTaskTempLegacyTTL            time.Duration         // reclaim a per-task temp dir (<temp base>/multica-task-*) that carries no execution lock — i.e. left by a daemon predating the lock — once nothing inside it has been touched for this long. Dirs that DO carry the lock are reclaimed on liveness, never on age, so this knob does not apply to them. Neither does it reclaim a dir holding no task content — an old empty leftover, or a shell left by a daemon that died between creating the dir and publishing its lock — because holding no content is exactly what a dir currently being published looks like (default: 0, disabled — see DefaultGCTaskTempLegacyTTL)
 	AutoUpdateEnabled              bool                  // periodically check for a newer CLI release and self-update when idle (default: true on Multica Cloud, false on self-host)
 	AutoUpdateCheckInterval        time.Duration         // how often the auto-update loop polls for a new release (default: 6h)
 	AutoReloadEnabled              bool                  // restart when the multica binary on disk no longer matches the running version (default: true for CLI-launched daemons)
+	PersistentLocalWorktrees       bool                  // keep one physical local_directory worktree per (repo, agent, issue/chat) conversation
 	PollInterval                   time.Duration
 	WSClaimPollInterval            time.Duration // upper bound for healthy WS batch-claim safety polls; actual sleeps use downward-only jitter
 	HeartbeatInterval              time.Duration
@@ -560,6 +563,10 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	gcPersistentLocalWorktreeTTL, err := durationFromEnv("MULTICA_GC_PERSISTENT_WORKTREE_TTL", DefaultGCPersistentLocalWorktreeTTL)
+	if err != nil {
+		return Config{}, err
+	}
 	gcRepoTTL, err := durationFromEnv("MULTICA_GC_REPO_TTL", DefaultGCRepoTTL)
 	if err != nil {
 		return Config{}, err
@@ -599,6 +606,17 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		autoReloadEnabled = false
 	}
 
+	// This fork retains physical worktrees by default so an ordinary upgrade
+	// cannot silently discard conversation continuity with a lost host override.
+	persistentLocalWorktrees := true
+	switch lifecycle := strings.TrimSpace(os.Getenv("MULTICA_LOCAL_WORKTREE_LIFECYCLE")); lifecycle {
+	case "", "conversation":
+	case "task":
+		persistentLocalWorktrees = false
+	default:
+		return Config{}, fmt.Errorf("MULTICA_LOCAL_WORKTREE_LIFECYCLE must be task or conversation, got %q", lifecycle)
+	}
+
 	return Config{
 		ServerBaseURL:                   serverBaseURL,
 		DaemonID:                        daemonID,
@@ -621,10 +639,12 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		GCCodexSessionTTL:               gcCodexSessionTTL,
 		GCHermesMemoryTTL:               gcHermesMemoryTTL,
 		GCHermesSessionTTL:              gcHermesSessionTTL,
+		GCPersistentLocalWorktreeTTL:    gcPersistentLocalWorktreeTTL,
 		GCTaskTempLegacyTTL:             gcTaskTempLegacyTTL,
 		AutoUpdateEnabled:               autoUpdateEnabled,
 		AutoUpdateCheckInterval:         autoUpdateInterval,
 		AutoReloadEnabled:               autoReloadEnabled,
+		PersistentLocalWorktrees:        persistentLocalWorktrees,
 		HealthPort:                      healthPort,
 		MaxConcurrentTasks:              maxConcurrentTasks,
 		PollInterval:                    pollInterval,

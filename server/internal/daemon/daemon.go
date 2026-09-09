@@ -1996,6 +1996,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		"codex_semantic_inactivity", d.cfg.CodexSemanticInactivityTimeout,
 		"max_concurrent_tasks", d.cfg.MaxConcurrentTasks,
 		"gc_enabled", d.cfg.GCEnabled,
+		"persistent_local_worktrees", d.cfg.PersistentLocalWorktrees,
 		"auto_update", d.cfg.AutoUpdateEnabled,
 		"launched_by", d.cfg.LaunchedBy,
 	)
@@ -5748,15 +5749,38 @@ func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Tas
 		return nil, true
 	}
 
-	// Worktree mode is the whole point of not serialising: each task gets its
-	// own checkout of the repo inside its env root, so there is no shared
-	// mutable state on the user's path to protect. Skipping the mutex here is
-	// what lets sibling tasks on one directory run concurrently. Path
-	// validation above still applies — git needs to write worktree
-	// registrations into the user's repo.
+	lockPath := assignment.RealPath
+	// Historical worktree mode creates a checkout per task and therefore needs
+	// no run-length lock. Conversation lifecycle mode deliberately shares one
+	// physical checkout, so serialize only that (repo, agent, issue/chat) key.
+	// Different agents on the same issue derive different keys and remain fully
+	// concurrent.
 	if assignment.UsesWorktree() {
-		taskLog.Info("local_directory: worktree mode, skipping path mutex")
-		return nil, false
+		conversationID := task.IssueID
+		conversationKind := string(execenv.GCKindIssue)
+		if conversationID == "" {
+			conversationID = task.ChatSessionID
+			conversationKind = string(execenv.GCKindChat)
+		}
+		if !d.cfg.PersistentLocalWorktrees || conversationID == "" {
+			taskLog.Info("local_directory: task-scoped worktree mode, skipping path mutex")
+			return nil, false
+		}
+		lockPath, err = execenv.PersistentLocalWorktreeEntryPath(
+			d.cfg.WorkspacesRoot, assignment.AbsPath, task.WorkspaceID, task.AgentID, conversationKind, conversationID,
+		)
+		if err != nil {
+			taskLog.Error("local_directory: derive persistent worktree identity failed", "error", err)
+			if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
+				kind:          terminalTaskReportFail,
+				taskID:        task.ID,
+				errorMessage:  err.Error(),
+				failureReason: "local_directory_error",
+			}); failErr != nil {
+				taskLog.Error("fail task after persistent worktree identity error", "error", failErr)
+			}
+			return nil, true
+		}
 	}
 
 	// A conversation is not a second writer. Everything above still applied —
@@ -5766,7 +5790,7 @@ func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Tas
 	// behind a 20-minute build with nothing to contribute to it (issue #7344).
 	// See localDirectoryLockExempt for why the mutex does not owe this task a
 	// slot.
-	if localDirectoryLockExempt(task) {
+	if !assignment.UsesWorktree() && localDirectoryLockExempt(task) {
 		taskLog.Info("local_directory: chat task, skipping path mutex")
 		return nil, false
 	}
@@ -5847,7 +5871,7 @@ func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Tas
 			}()
 		})
 	}
-	release, err = d.localPathLocks.Acquire(waitCtx, assignment.RealPath, task.ID, onWait)
+	release, err = d.localPathLocks.Acquire(waitCtx, lockPath, task.ID, onWait)
 	if err != nil {
 		// If the wait was cut short because the server finalized the task
 		// (terminal state) or deleted the row, the row is already in a
@@ -7739,6 +7763,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		}
 		if localAssignment.UsesWorktree() {
 			prepParams.LocalWorktree = &execenv.LocalWorktreeParams{LocalPath: localAssignment.AbsPath}
+			if d.cfg.PersistentLocalWorktrees {
+				prepParams.LocalWorktree.PersistentRoot = d.cfg.WorkspacesRoot
+			}
 			// Take the per-path mutex for the snapshot alone, then hand it
 			// straight back — long enough to read a consistent tree, short
 			// enough that worktree tasks still overlap for the run itself.

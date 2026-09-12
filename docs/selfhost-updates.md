@@ -23,12 +23,14 @@ copying its files without preserving ancestry is not the repair.
 2. Start a `selfhost/*` branch from `origin/main`. Merge upstream and every
    accepted local patch with non-rewriting merges. Do not deploy feature branches,
    rebase shared history, or omit a patch because an upstream update builds.
-3. Run `python3 scripts/check-selfhost-patches.py --current <deployed-commit>`.
+3. Run `bash scripts/check-selfhost-integration.sh --current <deployed-commit>`.
    Any deployed commit missing from the candidate blocks promotion. Add the
    missing history through a merge; do not weaken the check to hide the omission.
    The manifest also detects omission after a bad intermediate build has already
    replaced the previously good installation.
-4. Run the focused integration workflow locally and the broader tests warranted
+4. The same entry point runs in CI: static patch retention plus complete daemon,
+   execution-environment, repository-cache and provider regression packages with
+   the race detector and real-agent CLI guard. Run additional tests warranted
    by the change. Verify default configuration, not only an opt-in test setup.
    Record baseline failures explicitly; do not call a failing suite green.
 5. Open the fork PR with the retained/changed/retired capability list and test
@@ -47,6 +49,13 @@ copying its files without preserving ancestry is not the repair.
    If it fails, retain the evidence and keep the integration issue open.
 
 ## Two-turn acceptance
+
+Routine upgrades do not require repeating a full code audit. Review merge
+conflicts and changes to worktree identity/locking, home preparation, task
+credentials, process cleanup and resume behavior. Add a regression for changed
+interactions the existing suite does not cover. Tests are the repeatable gate;
+they do not prove compatibility with the installed native CLI, authentication,
+sandbox or deployed wiring. Keep the post-upgrade smoke for that boundary.
 
 Use one agent and issue with `local_directory` in worktree mode. Finish the first
 run before starting the second. Check:

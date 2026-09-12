@@ -830,7 +830,8 @@ type ReuseParams struct {
 }
 
 // Reuse wraps an existing workdir into an Environment and refreshes context files.
-// Returns nil if the workdir does not exist (caller should fall back to Prepare).
+// Returns nil if the workdir does not exist or required provider setup fails
+// (caller should fall back to Prepare).
 func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
 	if _, err := os.Stat(params.WorkDir); err != nil {
 		return nil
@@ -943,7 +944,15 @@ func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
 			codexHome = params.CodexConversationHome
 		}
 		if err := prepareCodexHomeWithOpts(codexHome, CodexHomeOptions{ConversationHome: params.CodexConversationHome != "", CodexVersion: params.CodexVersion, ResumeSessionID: params.ResumeSessionID, IsLocalDirectory: params.LocalDirectory, SessionStoreKey: codexSessionStoreKey(params.Profile, params.Task), CodexCustomArgs: params.CodexCustomArgs}, logger); err != nil {
-			logger.Warn("execenv: refresh codex-home failed", "error", err)
+			// Leaving env.CodexHome empty does not launch Codex against an
+			// ambient home: configureCodexTaskShellEnvironment rejects the empty
+			// value ("task CODEX_HOME is missing") and the run fails before
+			// launch. Decline the reuse instead, so the caller falls back to
+			// Prepare and the task still gets a usable task-local home. The
+			// prior session is not carried over, and a fresh Prepare that fails
+			// the same way still stops the task.
+			logger.Warn("execenv: refresh codex-home failed; forcing fresh prepare", "error", err)
+			return nil
 		} else {
 			env.CodexHome = codexHome
 			hydrate := hydrateCodexSkills

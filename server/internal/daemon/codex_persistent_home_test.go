@@ -112,3 +112,23 @@ func TestExecuteAndDrainPersistentHomeCancellationWaitsForCleanup(t *testing.T) 
 		}
 	}
 }
+
+// Upstream terminal handoff and the persistent-home cleanup lease must share
+// one receive. Consuming Result before the handoff loses the authoritative
+// outcome (and can spend a second cleanup budget waiting for it again).
+func TestExecuteAndDrainPersistentHomeTerminalHandoff(t *testing.T) {
+	probe := &handoffProbe{gate: make(chan struct{}), prefix: "idle watchdog fired; waiting"}
+	d := newTestDaemon(t)
+	d.cfg.AgentIdleWatchdog = 50 * time.Millisecond
+	d.cfg.AgentToolWatchdog = 50 * time.Millisecond
+	backend := &lateTerminalBackend{gate: probe.gate}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, _, err := d.executeAndDrain(ctx, backend, "test", agent.ExecOptions{PersistentCodexHome: true}, slog.New(probe), "persistent-terminal", "", new(atomic.Int32))
+	if err != nil || !probe.seen.Load() || backend.cancels.Load() == 0 || result.Status != "completed" {
+		t.Fatalf("terminal handoff lost: result=%+v err=%v handoff=%v", result, err, probe.seen.Load())
+	}
+	if result.ProcessCleanupConfirmed {
+		t.Fatal("terminal observation must not invent process cleanup evidence")
+	}
+}

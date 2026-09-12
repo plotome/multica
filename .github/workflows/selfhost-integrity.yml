@@ -21,15 +21,5 @@ jobs:
         with:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
-      - name: Check accepted patch ancestry and regression coverage
-        run: python3 scripts/check-selfhost-patches.py
-      - name: Test the integrity gate
-        run: python3 scripts/check-selfhost-patches.test.py
-      - name: Verify conversation and task isolation contracts
-        working-directory: server
-        run: >-
-          ../scripts/go-test-with-agent-cli-guard.sh --
-          go test -race -p 2 -parallel 2
-          ./internal/daemon ./internal/daemon/execenv ./pkg/agent
-          -run 'Test(PersistentLocalWorktree|IsolatedPrepareReusesPersistentPhysicalWorktree|PrunePersistentLocalWorktrees|AcquireLocalDirectoryLockSerializesPersistentConversation|CodexStartOrResumeThread|CodexTurnNotificationGate|ConfigureCodexTaskShellEnvironment|CodexTaskShellEnvInheritsRealHome|CodexConversationHome|PruneCodexConversationHomes|PersistentCodexSkills|CodexPersistentHome|ExecuteAndDrainPersistentHome|RunTaskCodexPersistentHome)'
-          -count=1 -timeout=5m
+      - name: Verify accepted patches and complete isolation regression packages
+        run: bash scripts/check-selfhost-integration.sh

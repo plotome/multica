@@ -41,6 +41,8 @@
       "required_tests": [
         "TestRunTaskCodexPersistentHomeTwoTurns",
         "TestExecuteAndDrainPersistentHomeCancellationWaitsForCleanup",
+        "TestExecuteAndDrainPersistentHomeTerminalHandoff",
+        "TestCodexExecuteCancellationInterruptsTurnAndPreservesUsage",
         "TestCodexConversationHomePreparationHelperTwoTurns",
         "TestCodexConversationHomeInvalidConfigFailsClosed",
         "TestCodexConversationHomeContinuityAndReset",

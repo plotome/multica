@@ -9,6 +9,58 @@ import (
 	"time"
 )
 
+func TestCodexConversationHomeFreshGenerationKeepsLeaseAndBindings(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	p := conversationHomeParams()
+	lease, err := ClaimCodexConversationHome(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	old := lease.Home()
+	if err := lease.BindSession("old-session"); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.StartFreshGeneration(); err != nil {
+		t.Fatal(err)
+	}
+	if lease.Home() == old {
+		t.Fatal("fresh retry reused old home")
+	}
+	if _, err := ClaimCodexConversationHome(p); err == nil {
+		t.Fatal("generation transition dropped conversation lock")
+	}
+	if err := lease.BindSession("new-session"); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.BindSession("old-session"); err == nil {
+		t.Fatal("old binding was overwritten")
+	}
+	fresh := lease.Home()
+	lease.Release()
+	p.ResumeSessionID = "old-session"
+	resumed, err := ClaimCodexConversationHome(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Home() != old {
+		t.Fatal("old session lost its home")
+	}
+	resumed.Release()
+	p.ResumeSessionID = "new-session"
+	resumed, err = ClaimCodexConversationHome(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Home() != fresh {
+		t.Fatal("new session binding incorrect")
+	}
+	resumed.Release()
+	if err := resumed.StartFreshGeneration(); err == nil {
+		t.Fatal("rotation without a lease succeeded")
+	}
+}
+
 func TestCodexConversationHomePreparationHelperTwoTurns(t *testing.T) {
 	shared := t.TempDir()
 	t.Setenv("CODEX_HOME", shared)

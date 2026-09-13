@@ -154,6 +154,35 @@ func (w *LocalWorktree) persistRecord() error {
 	})
 }
 
+// Missing subdirectories can be materialized by the user-state replay. Check
+// their nearest existing ancestor too, so a symlink cannot redirect cleanup or
+// injection outside this checkout.
+func validatePersistentWorkDir(worktree, dir string) error {
+	root, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		return err
+	}
+	for {
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err == nil {
+			rel, err := filepath.Rel(root, resolved)
+			if err != nil || !filepath.IsLocal(rel) {
+				return fmt.Errorf("execenv: persistent workdir escapes checkout: %s", dir)
+			}
+			return nil
+		}
+		if !os.IsNotExist(err) || filepath.Dir(dir) == dir {
+			return err
+		}
+		if _, statErr := os.Lstat(dir); statErr == nil {
+			return fmt.Errorf("execenv: persistent workdir cannot be resolved: %s: %w", dir, err)
+		} else if !os.IsNotExist(statErr) {
+			return statErr
+		}
+		dir = filepath.Dir(dir)
+	}
+}
+
 func cleanupPersistentLocalWorktreeArtifacts(entryRoot, workDir, provider string) error {
 	var errs []error
 	if err := CleanupRuntimeConfig(workDir, provider); err != nil {

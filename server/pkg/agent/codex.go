@@ -172,6 +172,11 @@ const CodexFirstTurnNoProgressMarker = "codex app-server no progress timeout"
 // did not answer within the bounded handshake window.
 const CodexHandshakeTimeoutMarker = "codex app-server handshake timeout"
 
+// A persistent home cannot use the in-process thread/start fallback. Carry
+// the same explicit refusal to the daemon, which can retry in a new home only
+// after this process tree has exited.
+var errCodexPersistentResumeRejected = errors.New("persistent Codex resume rejected")
+
 // codexResumeMarker and codexLineOverflowMarker are the two halves of the
 // error text a resume-overflow produces: the method that failed (written by
 // startOrResumeThread) and bufio's own ErrTooLong wording, which reaches the
@@ -1553,7 +1558,7 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 				Status:                  finalStatus,
 				Error:                   finalError,
 				DurationMs:              time.Since(startTime).Milliseconds(),
-				ResumeRejected:          isCodexResumeOverflow(opts, err),
+				ResumeRejected:          isCodexResumeOverflow(opts, err) || errors.Is(err, errCodexPersistentResumeRejected),
 				ProcessCleanupConfirmed: cleanupConfirmed,
 			}
 			return
@@ -1996,11 +2001,15 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 				return threadID, true, nil
 			}
 			if opts.PersistentCodexHome {
-				return "", false, fmt.Errorf("codex thread/resume returned no thread ID; refusing to reset persistent state")
+				return "", false, fmt.Errorf("%w: thread/resume returned no thread ID", errCodexPersistentResumeRejected)
 			}
 			logger.Warn("codex thread/resume returned no thread ID; falling back to thread/start", "prior_thread_id", priorThreadID)
 		} else {
 			if opts.PersistentCodexHome {
+				var rpcErr *codexRPCError
+				if errors.As(err, &rpcErr) && resumeRejectionWording(rpcErr.Message) {
+					return "", false, fmt.Errorf("%w: thread/resume failed: %w", errCodexPersistentResumeRejected, err)
+				}
 				return "", false, fmt.Errorf("codex thread/resume failed; persistent state preserved: %w", err)
 			}
 			if isCodexTransportError(err) {
@@ -2477,6 +2486,16 @@ type rpcResult struct {
 	err    error
 }
 
+type codexRPCError struct {
+	Method  string
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e *codexRPCError) Error() string {
+	return fmt.Sprintf("%s: %s (code=%d)", e.Method, e.Message, e.Code)
+}
+
 type codexHandshakeTimeoutError struct {
 	Method  string
 	Timeout time.Duration
@@ -2808,12 +2827,9 @@ func (c *codexClient) handleResponse(raw map[string]json.RawMessage) {
 	}
 
 	if errData, hasErr := raw["error"]; hasErr {
-		var rpcErr struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		}
+		rpcErr := codexRPCError{Method: pr.method}
 		_ = json.Unmarshal(errData, &rpcErr)
-		pr.ch <- rpcResult{err: fmt.Errorf("%s: %s (code=%d)", pr.method, rpcErr.Message, rpcErr.Code)}
+		pr.ch <- rpcResult{err: &rpcErr}
 	} else {
 		pr.ch <- rpcResult{result: raw["result"]}
 	}

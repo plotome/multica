@@ -8,6 +8,10 @@
       "required_tests": [
         "TestPersistentLocalWorktreeConfig",
         "TestPersistentLocalWorktreeReusesPhysicalCheckoutAndRefreshesUserState",
+        "TestPersistentLocalWorktreeChangesProjectDirectory",
+        "TestPersistentLocalWorktreeChangesRepositoryAndReturns",
+        "TestPersistentLocalWorktreeDirectoryChangeRejectsCorruptIdentity",
+        "TestValidatePersistentWorkDirRejectsSymlinkEscape",
         "TestPersistentLocalWorktreeSeparatesAgents",
         "TestIsolatedPrepareReusesPersistentPhysicalWorktree",
         "TestPersistentLocalWorktreeCrashRecoveryDoesNotCommitRuntimeArtifacts",
@@ -40,6 +44,10 @@
       ],
       "required_tests": [
         "TestRunTaskCodexPersistentHomeTwoTurns",
+        "TestPersistentHomeFreshRetryRequiresCleanupAndNoTools",
+        "TestHandleTask_BareErrorReportsFailureWithCancelledParent",
+        "TestCodexPersistentResumeRejectionUsesPositiveEvidence",
+        "TestCodexConversationHomeFreshGenerationKeepsLeaseAndBindings",
         "TestExecuteAndDrainPersistentHomeCancellationWaitsForCleanup",
         "TestExecuteAndDrainPersistentHomeTerminalHandoff",
         "TestCodexExecuteCancellationInterruptsTurnAndPreservesUsage",

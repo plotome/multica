@@ -32,10 +32,31 @@ conversation identity retain task-local state.
 
 A durable thread binding is written before publishing an in-flight resume
 pointer and again at terminal delivery. Missing/corrupt state for a known
-binding fails closed. A persisted resume requires its original workdir and
+binding fails closed. An actual resume requires its original workdir and
 rollout to remain available; the provider must return the requested thread ID.
 It cannot silently fall back to `thread/start`, nor can a catalog-refresh retry
 discard the resumed thread inside the same home.
+
+Legal environment changes retain upstream's cold-session path. Within the same
+repository, a project directory change reuses the conversation checkout and
+branch, removes the previous directory's runtime artifacts, and refreshes the
+recorded working directory. Different repositories retain separate checkouts;
+returning to an earlier repository reuses its checkout. Project membership is
+not part of conversation ownership, and each run injects the current project's
+context whether the provider resumes or starts fresh.
+
+When the prepared working directory differs from the prior session's directory,
+the daemon discloses the continuity gap and starts a fresh Home generation under
+the continuously held conversation lock. Likewise, a positively identified
+resume rejection can use upstream's single cold retry, but only before any tool
+activity and after process-tree cleanup is confirmed. The new Home receives
+current configuration, skills and task environment; old provider databases and
+session bindings are never copied, reset or overwritten.
+Once a session is positively retired, replacement-home preparation failure does
+not erase that fact: the failure callback still carries the retired session ID.
+Authentication, transport and unclassified failures do not prove a broken session. Missing
+rollouts, corrupt ownership, unexpected thread IDs and unconfirmed process
+cleanup still fail closed rather than being treated as an environment change.
 
 These directories isolate normal executions, not malicious processes sharing
 the same OS account. They do not make user-provided skills immutable. Codex
@@ -83,7 +104,8 @@ just `sessions/`. No current external backup policy is modified by this patch.
 Default tests use generated fixtures, fake JSON-RPC providers and real
 preparation subprocesses. They cover two-run process/credential separation,
 Home continuity, opaque future-state preservation, skill updates/no-op refresh,
-strict resume, cancellation cleanup evidence, generation reset, isolation,
+strict resume, cancellation cleanup evidence, generation reset, directory and
+repository round trips, cold retries, current project context, isolation,
 symlink rejection and GC. They do not prove native non-empty Goal/queue
 semantics or skill-prompt deduplication. Those require an explicitly authorized
 real-provider smoke after deployment, with no production queue replay.

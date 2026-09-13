@@ -5542,13 +5542,14 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		// shape of the failure (provider 5xx, network, process crash,
 		// …) rather than the coarse legacy "agent_error" bucket.
 		if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
-			kind:           terminalTaskReportFail,
-			taskID:         task.ID,
-			errorMessage:   err.Error(),
-			branchName:     result.BranchName,
-			workDir:        result.WorkDir,
-			durableWorkDir: result.DurableWorkDir,
-			failureReason:  taskRunFailureReason(err),
+			kind:             terminalTaskReportFail,
+			taskID:           task.ID,
+			errorMessage:     err.Error(),
+			branchName:       result.BranchName,
+			workDir:          result.WorkDir,
+			durableWorkDir:   result.DurableWorkDir,
+			retiredSessionID: result.RetiredSessionID,
+			failureReason:    taskRunFailureReason(err),
 		}); failErr != nil {
 			taskLog.Error("fail task callback failed", "error", failErr)
 		}
@@ -8047,9 +8048,26 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// agent.Config.BuiltinRuntime: it separates the provider's own discovered
 	// binary from an arbitrary command speaking its protocol. Reused here so
 	// the gate and the backend cannot disagree about which one is running.
-	if codexHomeLease != nil && task.PriorSessionID != "" {
-		if !sameExistingDir(env.WorkDir, task.PriorWorkDir) || !execenv.CodexResumeRolloutPresent(env.CodexHome, task.PriorSessionID) {
-			return TaskResult{}, asEnvironmentSetupFailure(errors.New("persisted Codex session workdir or rollout is unavailable; restore its cold backup or explicitly start a fresh session"))
+	startFreshCodexHome := func() error {
+		if !codexHomeSafeToRelease {
+			return errors.New("cannot start fresh Codex session before provider process cleanup is confirmed")
+		}
+		if err := codexHomeLease.StartFreshGeneration(); err != nil {
+			return err
+		}
+		home := codexHomeLease.Home()
+		if err := execenv.PrepareFreshCodexConversationHome(home, execenv.CodexHomeOptions{
+			CodexVersion: codexVersion, CodexCustomArgs: codexSandboxArgs,
+		}, taskCtx, taskLog); err != nil {
+			return err
+		}
+		env.CodexHome = home
+		return nil
+	}
+	hadPersistentResume := codexHomeLease != nil && task.PriorSessionID != ""
+	if hadPersistentResume {
+		if !execenv.CodexResumeRolloutPresent(env.CodexHome, task.PriorSessionID) {
+			return TaskResult{}, asEnvironmentSetupFailure(errors.New("persisted Codex rollout is unavailable; restore its cold backup or explicitly start a fresh session"))
 		}
 	}
 	resumeReachable := gateResumeToReachableSession(
@@ -8058,6 +8076,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		providerRefusesMissingSessionCwd(provider, !usesCustomProfileCommand),
 		taskLog,
 	)
+	// The upstream cwd gate may deliberately choose a cold session after a project
+	// move. Keep that behavior, but give it a new exclusively leased generation.
+	if hadPersistentResume && task.PriorSessionID == "" {
+		if err := startFreshCodexHome(); err != nil {
+			return TaskResult{}, asEnvironmentSetupFailure(fmt.Errorf("prepare fresh Codex home after environment change: %w", err))
+		}
+	}
 	// A reused workdir is necessary but not sufficient for a Codex resume: the
 	// prior thread's rollout must actually be present in this task's CODEX_HOME
 	// sessions (MUL-4424 isolates them). Drop the resume before the brief is
@@ -8070,6 +8095,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// Inject runtime-specific config (meta skill) so the agent discovers .agent_context/.
 	runtimeBrief, err := execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx)
 	if err != nil {
+		if codexHomeLease != nil {
+			return TaskResult{}, asEnvironmentSetupFailure(fmt.Errorf("inject persistent Codex runtime context: %w", err))
+		}
 		d.logger.Warn("execenv: inject runtime config failed (non-fatal)", "error", err)
 	}
 	// An exempt turn runs in the user's directory without having queued for it,
@@ -8428,13 +8456,24 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	var retiredSessionID string
 	defer func() { taskResult.RetiredSessionID = retiredSessionID }()
 
-	if codexHomeLease == nil && shouldRetryWithFreshSession(result, task.PriorSessionID, tools, provider) {
-		firstResult := result
-		firstUsage := result.Usage
-		firstTools := tools
+	if shouldRetryWithFreshSessionInEnvironment(result, task.PriorSessionID, tools, provider, codexHomeLease != nil) {
+		// Retirement is already established, even if preparing the replacement
+		// home fails. Preserve it on that terminal path too.
 		if !result.ResumeRejectedTransient {
 			retiredSessionID = task.PriorSessionID
 		}
+		if codexHomeLease != nil {
+			if err := startFreshCodexHome(); err != nil {
+				return TaskResult{}, asEnvironmentSetupFailure(fmt.Errorf("prepare fresh Codex home for resume retry: %w", err))
+			}
+			agentEnv["CODEX_HOME"] = env.CodexHome
+			if err := configureCodexTaskShellEnvironment(provider, env.CodexHome, os.Environ(), agentEnv, agentCustomEnv, d.logger); err != nil {
+				return TaskResult{}, err
+			}
+		}
+		firstResult := result
+		firstUsage := result.Usage
+		firstTools := tools
 		taskLog.Warn("session resume failed, retrying with fresh session", "error", result.Error)
 
 		// Rebuild cold-session context before the single retry. The prior
@@ -8460,7 +8499,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		task.PriorSessionResumeUnavailable = true
 		execOpts.ResumeContinuityNotice = ""
 		taskCtx.PriorSessionResumed = false
+		taskCtx.PriorSessionResumeUnavailable = true
 		if freshBrief, briefErr := execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx); briefErr != nil {
+			if codexHomeLease != nil {
+				return TaskResult{}, asEnvironmentSetupFailure(fmt.Errorf("inject cold Codex retry context: %w", briefErr))
+			}
 			taskLog.Warn("execenv: re-inject cold runtime config for fresh retry failed (non-fatal)", "error", briefErr)
 		} else {
 			runtimeBrief = freshBrief
@@ -8470,7 +8513,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		}
 		freshPrompt := BuildPrompt(task, provider, promptOptions...)
 
-		retryResult, retryTools, retryErr := d.executeAndDrain(ctx, backend, freshPrompt, execOpts, taskLog, task.ID, env.CodexHome, &msgSeq)
+		if codexHomeLease != nil {
+			codexHomeSafeToRelease = false
+		}
+		retryResult, retryTools, retryErr := d.executeAndDrain(ctx, backend, freshPrompt, execOpts, taskLog, task.ID, env.CodexHome, &msgSeq, codexHomeLease)
+		if codexHomeLease != nil {
+			codexHomeSafeToRelease = retryResult.ProcessCleanupConfirmed
+		}
 		if retryErr != nil {
 			taskLog.Error("fresh session also failed to start; keeping the original poisoned result", "error", retryErr)
 		} else if retryResult.Status != "completed" && retryResult.SessionID == "" {
@@ -8735,6 +8784,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			FailureReason: failureReason,
 		}, nil
 	}
+}
+
+// Persistent homes add a process-tree cleanup requirement to the upstream
+// semantic retry gate. No fresh provider may overlap a prior home writer.
+func shouldRetryWithFreshSessionInEnvironment(result agent.Result, priorSessionID string, tools int32, provider string, persistentHome bool) bool {
+	return (!persistentHome || result.ProcessCleanupConfirmed) && shouldRetryWithFreshSession(result, priorSessionID, tools, provider)
 }
 
 // shouldRetryWithFreshSession reports whether a failed run that requested

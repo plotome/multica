@@ -55,7 +55,14 @@ func isACPResumeRejected(err error) bool {
 	// own "session" would otherwise satisfy the noun half of every error this
 	// RPC can produce and quietly turn the predicate into the exclusion rule
 	// the doc above rejects.
-	text := strings.ToLower(rpcErr.Message + " " + rpcErr.Data)
+	return resumeRejectionWording(rpcErr.Message + " " + rpcErr.Data)
+}
+
+// resumeRejectionWording is shared by ACP and Codex's explicit resume RPC
+// responses. Pass the provider's message only, never the method name (which
+// would supply a session-shaped noun to unrelated infrastructure errors).
+func resumeRejectionWording(message string) bool {
+	text := strings.ToLower(message)
 	// Delete request-shaped complaints before matching rather than returning
 	// false on sight of one. A message can carry both — "invalid session
 	// request: session not found" — and vetoing the whole string would throw

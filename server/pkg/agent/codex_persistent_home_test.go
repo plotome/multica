@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"runtime"
@@ -67,5 +68,36 @@ echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thread","
 			t.Fatalf("cleanup evidence: status=%s cleanup=%v want=%v error=%s", result.Status, result.ProcessCleanupConfirmed, confirmed, result.Error)
 		}
 		codexCleanupConfirmationOverride.Store(0)
+	}
+}
+
+func TestCodexPersistentResumeRejectionUsesPositiveEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		message  string
+		rejected bool
+	}{
+		{"unknown thread", true},
+		{"thread not found", true},
+		{"invalid thread identifier old-thread", true},
+		{"invalid thread request: cwd must be absolute", false},
+		{"invalid credentials for this thread", false},
+		{"authentication failed: 401", false},
+		{"rate limit exceeded", false},
+		{"quota exceeded", false},
+		{"provider returned 503", false},
+		{"cwd does not exist for thread old-thread", false},
+	} {
+		t.Run(tc.message, func(t *testing.T) {
+			c, fs, _ := newTestCodexClient(t)
+			wait := drainRPCScript(t, c, fs, []rpcResponse{{method: "thread/resume", errMsg: tc.message, errCode: -32602}})
+			_, _, err := c.startOrResumeThread(context.Background(), ExecOptions{Cwd: "/work", ResumeSessionID: "original", PersistentCodexHome: true}, slog.Default())
+			wait()
+			if errors.Is(err, errCodexPersistentResumeRejected) != tc.rejected {
+				t.Fatalf("rejected=%v error=%v", tc.rejected, err)
+			}
+			if len(fs.Lines()) != 1 {
+				t.Fatal("provider retried inside the old home")
+			}
+		})
 	}
 }

@@ -15,7 +15,7 @@ import (
 )
 
 func TestRunTaskCodexPersistentHomeTwoTurns(t *testing.T) {
-	for _, mode := range []string{"warm", "cwd-change", "resume-rejected", "rollout-missing", "resume-auth", "unexpected-thread"} {
+	for _, mode := range []string{"warm", "cwd-change", "resume-rejected", "rollout-missing", "resume-auth", "unexpected-thread", "retry-config-failure"} {
 		t.Run(mode, func(t *testing.T) { testRunTaskCodexPersistentHomeTwoTurns(t, mode) })
 	}
 }
@@ -24,7 +24,8 @@ func testRunTaskCodexPersistentHomeTwoTurns(t *testing.T, mode string) {
 	if runtime.GOOS == "windows" {
 		t.Skip("persistent enrollment is Unix-only")
 	}
-	t.Setenv("CODEX_HOME", t.TempDir())
+	sharedHome := t.TempDir()
+	t.Setenv("CODEX_HOME", sharedHome)
 	d, _, cleanup := newLeaderReuseTestDaemon(t)
 	defer cleanup()
 	d.activeStores = make(map[string]int)
@@ -84,7 +85,7 @@ done
 		if mode == "cwd-change" {
 			second.PriorWorkDir = t.TempDir()
 		}
-		if mode == "resume-rejected" || mode == "resume-auth" {
+		if mode == "resume-rejected" || mode == "resume-auth" || mode == "retry-config-failure" {
 			script = strings.Replace(script, "case \"$line\" in", `case "$line" in
     *'"method":"thread/resume"'*)
       printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32600,"message":"thread not found"}}\n' "$id" ;;`, 1)
@@ -92,11 +93,23 @@ done
 		if mode == "resume-auth" {
 			script = strings.ReplaceAll(script, "thread not found", "authentication failed: 401")
 		}
+		if mode == "retry-config-failure" {
+			// The old process refuses resume, then makes the next preparation
+			// fail. It must not erase the already established retirement fact.
+			script = strings.Replace(script, `*'"method":"thread/resume"'*)`, `*'"method":"thread/resume"'*)
+      printf 'invalid = [' > '`+filepath.Join(sharedHome, "config.toml")+`'`, 1)
+		}
 		if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	two, err := d.runTask(context.Background(), second, "codex", 0, d.logger)
+	if mode == "retry-config-failure" {
+		if err == nil || !strings.Contains(err.Error(), "prepare fresh Codex home") || two.RetiredSessionID != one.SessionID {
+			t.Fatalf("lost retirement on failed retry preparation: %+v %v", two, err)
+		}
+		return
+	}
 	if mode == "rollout-missing" || mode == "resume-auth" || mode == "unexpected-thread" {
 		if mode == "rollout-missing" {
 			if err == nil || !strings.Contains(err.Error(), "persisted Codex rollout is unavailable") {

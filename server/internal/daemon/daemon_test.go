@@ -4878,6 +4878,13 @@ func TestHandleTask_BareErrorReportsFailureWithCancelledParent(t *testing.T) {
 		if !strings.HasSuffix(req.URL.Path, "/fail") {
 			t.Errorf("unexpected daemon call: %s %s", req.Method, req.URL.Path)
 		}
+		var body map[string]any
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body["retired_session_id"] != "rejected-session" {
+			t.Errorf("lost retired session on error callback: %v", body["retired_session_id"])
+		}
 		failCalls.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -4893,7 +4900,7 @@ func TestHandleTask_BareErrorReportsFailureWithCancelledParent(t *testing.T) {
 		if !errors.Is(runCtx.Err(), context.Canceled) {
 			t.Errorf("runner context error = %v, want context.Canceled", runCtx.Err())
 		}
-		return TaskResult{}, errors.New("runner exited during shutdown")
+		return TaskResult{RetiredSessionID: "rejected-session"}, errors.New("runner exited during shutdown")
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

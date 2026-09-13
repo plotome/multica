@@ -51,8 +51,10 @@ the continuously held conversation lock. Likewise, a positively identified
 resume rejection can use upstream's single cold retry, but only before any tool
 activity and after process-tree cleanup is confirmed. The new Home receives
 current configuration, skills and task environment; old provider databases and
-session bindings are never copied, reset or overwritten. Authentication,
-transport and unclassified failures do not prove a broken session. Missing
+session bindings are never copied, reset or overwritten.
+Once a session is positively retired, replacement-home preparation failure does
+not erase that fact: the failure callback still carries the retired session ID.
+Authentication, transport and unclassified failures do not prove a broken session. Missing
 rollouts, corrupt ownership, unexpected thread IDs and unconfirmed process
 cleanup still fail closed rather than being treated as an environment change.
 

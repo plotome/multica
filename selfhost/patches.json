@@ -45,6 +45,7 @@
       "required_tests": [
         "TestRunTaskCodexPersistentHomeTwoTurns",
         "TestPersistentHomeFreshRetryRequiresCleanupAndNoTools",
+        "TestHandleTask_BareErrorReportsFailureWithCancelledParent",
         "TestCodexPersistentResumeRejectionUsesPositiveEvidence",
         "TestCodexConversationHomeFreshGenerationKeepsLeaseAndBindings",
         "TestExecuteAndDrainPersistentHomeCancellationWaitsForCleanup",

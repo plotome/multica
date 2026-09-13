@@ -5542,13 +5542,14 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		// shape of the failure (provider 5xx, network, process crash,
 		// …) rather than the coarse legacy "agent_error" bucket.
 		if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
-			kind:           terminalTaskReportFail,
-			taskID:         task.ID,
-			errorMessage:   err.Error(),
-			branchName:     result.BranchName,
-			workDir:        result.WorkDir,
-			durableWorkDir: result.DurableWorkDir,
-			failureReason:  taskRunFailureReason(err),
+			kind:             terminalTaskReportFail,
+			taskID:           task.ID,
+			errorMessage:     err.Error(),
+			branchName:       result.BranchName,
+			workDir:          result.WorkDir,
+			durableWorkDir:   result.DurableWorkDir,
+			retiredSessionID: result.RetiredSessionID,
+			failureReason:    taskRunFailureReason(err),
 		}); failErr != nil {
 			taskLog.Error("fail task callback failed", "error", failErr)
 		}
@@ -8456,6 +8457,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	defer func() { taskResult.RetiredSessionID = retiredSessionID }()
 
 	if shouldRetryWithFreshSessionInEnvironment(result, task.PriorSessionID, tools, provider, codexHomeLease != nil) {
+		// Retirement is already established, even if preparing the replacement
+		// home fails. Preserve it on that terminal path too.
+		if !result.ResumeRejectedTransient {
+			retiredSessionID = task.PriorSessionID
+		}
 		if codexHomeLease != nil {
 			if err := startFreshCodexHome(); err != nil {
 				return TaskResult{}, asEnvironmentSetupFailure(fmt.Errorf("prepare fresh Codex home for resume retry: %w", err))
@@ -8468,9 +8474,6 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		firstResult := result
 		firstUsage := result.Usage
 		firstTools := tools
-		if !result.ResumeRejectedTransient {
-			retiredSessionID = task.PriorSessionID
-		}
 		taskLog.Warn("session resume failed, retrying with fresh session", "error", result.Error)
 
 		// Rebuild cold-session context before the single retry. The prior

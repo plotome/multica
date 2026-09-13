@@ -1,6 +1,7 @@
 package execenv
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -216,7 +217,50 @@ func (l *CodexConversationHomeLease) Home() string {
 	if l == nil {
 		return ""
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return l.home
+}
+
+// StartFreshGeneration keeps the conversation lock continuously held. Callers
+// must first confirm that no provider process is running. Prior bindings and
+// provider-owned databases remain untouched for cold recovery.
+func (l *CodexConversationHomeLease) StartFreshGeneration() error {
+	if l == nil {
+		return errors.New("no Codex home lease")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.lock == nil {
+		return errors.New("cannot rotate Codex home without an active lease")
+	}
+	gens, err := privateCodexChild(l.root, "generations")
+	if err != nil {
+		return err
+	}
+	var nonce [sha256.Size]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
+	}
+	generation := hex.EncodeToString(nonce[:])
+	home := filepath.Join(gens, generation)
+	// Exclusive creation: a fresh session must never inherit an existing DB.
+	if err := os.Mkdir(home, 0o700); err != nil {
+		return err
+	}
+	l.home, l.generation = home, generation
+	return nil
+}
+
+// PrepareFreshCodexConversationHome refreshes only the new home, without
+// replaying the worktree or mutating the previous generation's databases.
+func PrepareFreshCodexConversationHome(home string, opts CodexHomeOptions, task TaskContextForEnv, logger *slog.Logger) error {
+	opts.ConversationHome = true
+	opts.ResumeSessionID = ""
+	if err := prepareCodexHomeWithOpts(home, opts, logger); err != nil {
+		return err
+	}
+	return hydratePersistentCodexSkills(home, task.AgentSkills, task.DisabledRuntimeSkills, logger)
 }
 
 func validateLeasedCodexHome(home string) error {

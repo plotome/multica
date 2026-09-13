@@ -371,14 +371,19 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 		wantWorkDir := filepath.Join(worktreePath, rel)
 		if record.WorkspaceID != params.WorkspaceID || record.AgentID != params.AgentID ||
 			record.ConversationID != params.ConversationID || record.ConversationKind != params.ConversationKind ||
-			record.GitRoot != gitRoot || record.WorktreePath != worktreePath || record.WorkDir != wantWorkDir {
+			record.GitRoot != gitRoot || record.WorktreePath != worktreePath {
 			return nil, errors.New("execenv: persistent local worktree identity does not match this conversation")
 		}
 		branch, branchErr := runGitTrimmed(worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
 		if branchErr != nil || branch != record.Branch {
 			return nil, fmt.Errorf("execenv: persistent local worktree branch is %q, expected %q", branch, record.Branch)
 		}
-		if err := cleanupPersistentLocalWorktreeArtifacts(persistentEntryRoot, wantWorkDir, record.Provider); err != nil {
+		for _, dir := range []string{record.WorkDir, wantWorkDir} {
+			if err := validatePersistentWorkDir(worktreePath, dir); err != nil {
+				return nil, err
+			}
+		}
+		if err := cleanupPersistentLocalWorktreeArtifacts(persistentEntryRoot, record.WorkDir, record.Provider); err != nil {
 			return nil, fmt.Errorf("execenv: clean artifacts from interrupted persistent local worktree task: %w", err)
 		}
 		existingUnmerged, err = unmergedPaths(worktreePath)
@@ -542,6 +547,12 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 		return nil, replayErr
 	}
 	wt.ReplayConflicts = replay.conflicts
+	if persistent {
+		if err := validatePersistentWorkDir(worktreePath, wt.WorkDir); err != nil {
+			rollback()
+			return nil, err
+		}
+	}
 	// An unresolved merge means the branch does not carry this turn's snapshot
 	// yet; only a commit after the agent resolves can put it there.
 	wt.snapshotPending = len(replay.conflicts) > 0

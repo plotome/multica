@@ -15,6 +15,12 @@ import (
 )
 
 func TestRunTaskCodexPersistentHomeTwoTurns(t *testing.T) {
+	for _, mode := range []string{"warm", "cwd-change", "resume-rejected", "rollout-missing", "resume-auth", "unexpected-thread"} {
+		t.Run(mode, func(t *testing.T) { testRunTaskCodexPersistentHomeTwoTurns(t, mode) })
+	}
+}
+
+func testRunTaskCodexPersistentHomeTwoTurns(t *testing.T, mode string) {
 	if runtime.GOOS == "windows" {
 		t.Skip("persistent enrollment is Unix-only")
 	}
@@ -60,8 +66,64 @@ done
 	second := leaderReuseTestTask("codex-second")
 	second.AuthToken = "mat_fixture_second"
 	second.PriorSessionID, second.PriorWorkDir = one.SessionID, one.WorkDir
+	second.ProjectDescription = "NEW_PROJECT_CONTEXT"
+	second.ProjectID = "new-project"
+	if mode == "rollout-missing" {
+		data, err := os.ReadFile(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		home := strings.Split(strings.TrimSpace(string(data)), "|")[0]
+		if err := os.Remove(filepath.Join(home, "sessions/2026/09/09/rollout-2026-09-09T00-00-00-test-thread.jsonl")); err != nil {
+			t.Fatal(err)
+		}
+	} else if mode != "warm" {
+		// Fresh starts return a new thread; a refused resume must not run
+		// thread/start in the old provider process or reuse its database.
+		script = strings.ReplaceAll(script, "test-thread", "new-thread")
+		if mode == "cwd-change" {
+			second.PriorWorkDir = t.TempDir()
+		}
+		if mode == "resume-rejected" || mode == "resume-auth" {
+			script = strings.Replace(script, "case \"$line\" in", `case "$line" in
+    *'"method":"thread/resume"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32600,"message":"thread not found"}}\n' "$id" ;;`, 1)
+		}
+		if mode == "resume-auth" {
+			script = strings.ReplaceAll(script, "thread not found", "authentication failed: 401")
+		}
+		if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	two, err := d.runTask(context.Background(), second, "codex", 0, d.logger)
-	if err != nil || two.Status != "completed" || two.SessionID != one.SessionID {
+	if mode == "rollout-missing" || mode == "resume-auth" || mode == "unexpected-thread" {
+		if mode == "rollout-missing" {
+			if err == nil || !strings.Contains(err.Error(), "persisted Codex rollout is unavailable") {
+				t.Fatalf("missing rollout did not fail closed: %+v %v", two, err)
+			}
+		} else if err != nil || two.Status != "blocked" || two.RetiredSessionID != "" {
+			t.Fatalf("unsafe recovery: %+v %v", two, err)
+		}
+		data, err := os.ReadFile(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows := strings.Split(strings.TrimSpace(string(data)), "\n")
+		want := 2
+		if mode == "rollout-missing" {
+			want = 1
+		}
+		if len(rows) != want {
+			t.Fatalf("unsafe retry occurred: %d executions, want %d", len(rows), want)
+		}
+		return
+	}
+	wantSession := one.SessionID
+	if mode != "warm" {
+		wantSession = "new-thread"
+	}
+	if err != nil || two.Status != "completed" || two.SessionID != wantSession {
 		t.Fatalf("second: %+v %v", two, err)
 	}
 	data, err := os.ReadFile(record)
@@ -69,15 +131,26 @@ done
 		t.Fatal(err)
 	}
 	rows := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(rows) != 2 {
-		t.Fatalf("expected two executions, got %d", len(rows))
+	wantExecutions := 2
+	if mode == "resume-rejected" {
+		wantExecutions = 3
 	}
-	a, b := strings.Split(rows[0], "|"), strings.Split(rows[1], "|")
+	if len(rows) != wantExecutions {
+		t.Fatalf("expected %d executions, got %d", wantExecutions, len(rows))
+	}
+	a, b := strings.Split(rows[0], "|"), strings.Split(rows[len(rows)-1], "|")
 	if len(a) != 4 || len(b) != 4 {
 		t.Fatal("invalid execution record")
 	}
-	if a[0] != b[0] || a[1] != first.ID || b[1] != second.ID || a[2] != first.AuthToken || b[2] != second.AuthToken || a[3] == b[3] {
+	if (a[0] == b[0]) != (mode == "warm") || a[1] != first.ID || b[1] != second.ID || a[2] != first.AuthToken || b[2] != second.AuthToken || a[3] == b[3] {
 		t.Fatal("home/process/credential invariant failed")
+	}
+	if mode == "resume-rejected" && two.RetiredSessionID != one.SessionID {
+		t.Fatal("rejected session not retired")
+	}
+	brief, err := os.ReadFile(filepath.Join(two.WorkDir, "AGENTS.md"))
+	if err != nil || !strings.Contains(string(brief), "NEW_PROJECT_CONTEXT") {
+		t.Fatalf("new project context missing: %v", err)
 	}
 }
 
@@ -109,6 +182,18 @@ func TestExecuteAndDrainPersistentHomeCancellationWaitsForCleanup(t *testing.T) 
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("cleanup not collected")
+		}
+	}
+}
+
+func TestPersistentHomeFreshRetryRequiresCleanupAndNoTools(t *testing.T) {
+	for _, confirmed := range []bool{false, true} {
+		for _, toolCount := range []int32{0, 1} {
+			result := agent.Result{Status: "failed", ResumeRejected: true, ProcessCleanupConfirmed: confirmed}
+			got := shouldRetryWithFreshSessionInEnvironment(result, "old-session", toolCount, "codex", true)
+			if got != (confirmed && toolCount == 0) {
+				t.Fatalf("retry=%v cleanup=%v tools=%d", got, confirmed, toolCount)
+			}
 		}
 	}
 }

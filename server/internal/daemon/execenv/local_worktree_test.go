@@ -168,6 +168,159 @@ func TestPersistentLocalWorktreeReusesPhysicalCheckoutAndRefreshesUserState(t *t
 	removePersistentForTest(t, second)
 }
 
+func TestPersistentLocalWorktreeChangesProjectDirectory(t *testing.T) {
+	repo := newTestRepo(t)
+	writeFile(t, filepath.Join(repo, "research", "README.md"), "research")
+	writeFile(t, filepath.Join(repo, "execution", "README.md"), "execution")
+	params := persistentParamsForTest(t, filepath.Join(repo, "research"), t.TempDir(), testBranchOwner.AgentID)
+	first, err := PrepareLocalWorktree(params, worktreeTestLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InjectRuntimeConfig(first.WorkDir, "claude", TaskContextForEnv{}); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(first.WorkDir, "agent.txt"), "preserved")
+	params.LocalPath = filepath.Join(repo, "execution")
+	params.EnvRoot = t.TempDir()
+	params.TaskID = turnTwoTask
+	second, err := PrepareLocalWorktree(params, worktreeTestLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Path != second.Path || first.Branch != second.Branch || second.WorkDir != filepath.Join(first.Path, "execution") {
+		t.Fatal("project change lost checkout identity")
+	}
+	if got := readFile(t, filepath.Join(first.WorkDir, "agent.txt")); got != "preserved" {
+		t.Fatal("lost prior work")
+	}
+	if _, err := os.Stat(filepath.Join(first.WorkDir, "CLAUDE.md")); !os.IsNotExist(err) {
+		t.Fatal("old runtime brief survived directory change")
+	}
+	record, err := readPersistentLocalWorktreeRecord(second.PersistentEntryRoot)
+	if err != nil || record.WorkDir != second.WorkDir {
+		t.Fatalf("stale workdir record: %+v %v", record, err)
+	}
+	if _, err := second.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatal(err)
+	}
+	params.LocalPath = filepath.Join(repo, "research")
+	params.EnvRoot = t.TempDir()
+	params.TaskID = "return-to-research"
+	third, err := PrepareLocalWorktree(params, worktreeTestLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.WorkDir != first.WorkDir || third.Path != first.Path || third.Branch != first.Branch {
+		t.Fatal("round trip lost checkout identity")
+	}
+	if got := readFile(t, filepath.Join(third.WorkDir, "agent.txt")); got != "preserved" {
+		t.Fatal("round trip lost prior work")
+	}
+	if _, err := third.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatal(err)
+	}
+	removePersistentForTest(t, third)
+}
+
+func TestPersistentLocalWorktreeChangesRepositoryAndReturns(t *testing.T) {
+	firstRepo, otherRepo := newTestRepo(t), newTestRepo(t)
+	params := persistentParamsForTest(t, firstRepo, t.TempDir(), testBranchOwner.AgentID)
+	first, err := PrepareLocalWorktree(params, worktreeTestLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(first.WorkDir, "agent.txt"), "first repository")
+	if _, err := first.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatal(err)
+	}
+	params.LocalPath, params.EnvRoot, params.TaskID = otherRepo, t.TempDir(), turnTwoTask
+	second, err := PrepareLocalWorktree(params, worktreeTestLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Path == first.Path || second.GitRoot == first.GitRoot {
+		t.Fatal("different repositories share a checkout")
+	}
+	if _, err := os.Stat(filepath.Join(second.Path, "agent.txt")); !os.IsNotExist(err) {
+		t.Fatal("cross-repository state leaked")
+	}
+	if _, err := second.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatal(err)
+	}
+	params.LocalPath, params.EnvRoot, params.TaskID = firstRepo, t.TempDir(), "return-to-first-repository"
+	third, err := PrepareLocalWorktree(params, worktreeTestLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Path != first.Path || readFile(t, filepath.Join(third.Path, "agent.txt")) != "first repository" {
+		t.Fatal("return lost original checkout")
+	}
+	if _, err := third.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatal(err)
+	}
+	removePersistentForTest(t, second)
+	removePersistentForTest(t, third)
+}
+
+func TestPersistentLocalWorktreeDirectoryChangeRejectsCorruptIdentity(t *testing.T) {
+	for _, field := range []string{"workspace", "agent", "conversation", "kind", "repository", "branch", "workdir"} {
+		t.Run(field, func(t *testing.T) {
+			repo := newTestRepo(t)
+			params := persistentParamsForTest(t, repo, t.TempDir(), testBranchOwner.AgentID)
+			first, err := PrepareLocalWorktree(params, worktreeTestLogger())
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, err := readPersistentLocalWorktreeRecord(first.PersistentEntryRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch field {
+			case "workspace":
+				record.WorkspaceID = "other-workspace"
+			case "agent":
+				record.AgentID = "other-agent"
+			case "conversation":
+				record.ConversationID = "other-conversation"
+			case "kind":
+				record.ConversationKind = string(GCKindChat)
+			case "repository":
+				record.GitRoot = t.TempDir()
+			case "branch":
+				record.Branch = "other-branch"
+			case "workdir":
+				record.WorkDir = t.TempDir()
+			}
+			if err := writePersistentLocalWorktreeRecord(first.PersistentEntryRoot, record); err != nil {
+				t.Fatal(err)
+			}
+			params.EnvRoot, params.TaskID = t.TempDir(), turnTwoTask
+			if _, err := PrepareLocalWorktree(params, worktreeTestLogger()); err == nil {
+				t.Fatal("corrupt identity allowed")
+			}
+		})
+	}
+}
+
+func TestValidatePersistentWorkDirRejectsSymlinkEscape(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "missing"), filepath.Join(root, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"escape", "escape/missing", "dangling", "dangling/child"} {
+		if err := validatePersistentWorkDir(root, filepath.Join(root, path)); err == nil {
+			t.Errorf("allowed %s", path)
+		}
+	}
+	if err := validatePersistentWorkDir(root, filepath.Join(root, "future", "child")); err != nil {
+		t.Fatalf("safe missing directory rejected: %v", err)
+	}
+}
+
 func TestPersistentLocalWorktreeSeparatesAgents(t *testing.T) {
 	repo := newTestRepo(t)
 	persistentRoot := t.TempDir()
@@ -2200,7 +2353,18 @@ func TestIsolatedPrepareReusesPersistentPhysicalWorktree(t *testing.T) {
 }
 
 func TestPersistentLocalWorktreeCrashRecoveryDoesNotCommitRuntimeArtifacts(t *testing.T) {
+	t.Run("same-directory", func(t *testing.T) { testPersistentLocalWorktreeCrashRecovery(t, false) })
+	t.Run("changed-directory", func(t *testing.T) { testPersistentLocalWorktreeCrashRecovery(t, true) })
+}
+
+func testPersistentLocalWorktreeCrashRecovery(t *testing.T, changeDirectory bool) {
 	repo := newTestRepo(t)
+	localPath := repo
+	if changeDirectory {
+		writeFile(t, filepath.Join(repo, "research", "README.md"), "research")
+		writeFile(t, filepath.Join(repo, "execution", "README.md"), "execution")
+		localPath = filepath.Join(repo, "research")
+	}
 	workspacesRoot := t.TempDir()
 	prepare := func(taskID string) *Environment {
 		t.Helper()
@@ -2216,7 +2380,7 @@ func TestPersistentLocalWorktreeCrashRecoveryDoesNotCommitRuntimeArtifacts(t *te
 				AgentID: testBranchOwner.AgentID,
 			},
 			LocalWorktree: &LocalWorktreeParams{
-				LocalPath:      repo,
+				LocalPath:      localPath,
 				PersistentRoot: workspacesRoot,
 			},
 		}, worktreeTestLogger())
@@ -2230,9 +2394,12 @@ func TestPersistentLocalWorktreeCrashRecoveryDoesNotCommitRuntimeArtifacts(t *te
 	// and no Finalize call, while genuine agent work remains uncommitted.
 	first := prepare(turnOneTask)
 	writeFile(t, filepath.Join(first.WorkDir, "agent.txt"), "survives crash\n")
+	if changeDirectory {
+		localPath = filepath.Join(repo, "execution")
+	}
 	second := prepare(turnTwoTask)
-	if second.WorkDir != first.WorkDir {
-		t.Fatalf("second cwd = %q, want stable %q", second.WorkDir, first.WorkDir)
+	if (second.WorkDir != first.WorkDir) != changeDirectory {
+		t.Fatalf("unexpected cwd transition: first=%q second=%q changed=%v", first.WorkDir, second.WorkDir, changeDirectory)
 	}
 	if err := CleanupRuntimeConfig(second.WorkDir, "claude"); err != nil {
 		t.Fatalf("CleanupRuntimeConfig: %v", err)
@@ -2244,7 +2411,11 @@ func TestPersistentLocalWorktreeCrashRecoveryDoesNotCommitRuntimeArtifacts(t *te
 		t.Fatalf("Finalize: %v", err)
 	}
 
-	if got := gitRun(t, repo, "show", second.LocalWorktree.Branch+":agent.txt"); got != "survives crash" {
+	agentPath := "agent.txt"
+	if changeDirectory {
+		agentPath = "research/agent.txt"
+	}
+	if got := gitRun(t, repo, "show", second.LocalWorktree.Branch+":"+agentPath); got != "survives crash" {
 		t.Fatalf("recovered branch lost agent output: %q", got)
 	}
 	tree := gitRun(t, repo, "ls-tree", "-r", "--name-only", second.LocalWorktree.Branch)

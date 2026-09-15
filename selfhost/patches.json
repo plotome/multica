@@ -43,6 +43,7 @@
         "docs/codex-conversation-state.md"
       ],
       "required_tests": [
+        "TestCodexHomeHandoff",
         "TestRunTaskCodexPersistentHomeTwoTurns",
         "TestPersistentHomeFreshRetryRequiresCleanupAndNoTools",
         "TestHandleTask_BareErrorReportsFailureWithCancelledParent",

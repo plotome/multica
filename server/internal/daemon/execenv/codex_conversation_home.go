@@ -16,7 +16,9 @@ import (
 
 const codexConversationHomesRoot = "multica-homes-v1"
 
-var errCodexConversationBusy = errors.New("Codex conversation is already running")
+// ErrCodexConversationBusy means a live lease must be released before takeover.
+// It does not include quarantined or corrupt state, which must not be retried.
+var ErrCodexConversationBusy = errors.New("Codex conversation is already running")
 
 // CodexConversationHomeParams deliberately separates execution identity from
 // conversation identity. Fresh sessions get a new generation; resumes resolve
@@ -124,7 +126,7 @@ func lockCodexConversation(root string) (*os.File, error) {
 		if err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%w: %s", errCodexConversationBusy, root)
+		return nil, fmt.Errorf("%w: %s", ErrCodexConversationBusy, root)
 	}
 	return f, nil
 }
@@ -280,7 +282,7 @@ func validateLeasedCodexHome(home string) error {
 		releaseLockFile(lock)
 		return fmt.Errorf("Codex home execution lock is not held: %s", home)
 	}
-	if !errors.Is(err, errCodexConversationBusy) {
+	if !errors.Is(err, ErrCodexConversationBusy) {
 		return err
 	}
 	return nil

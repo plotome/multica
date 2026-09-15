@@ -611,7 +611,9 @@ type Daemon struct {
 	// envRootBusyWait is how long a task that is entitled to a prior env root
 	// waits for the previous run to let go of it before giving up and preparing
 	// a fresh one. New() sets it; the zero value means "do not wait", which is
-	// what focused unit tests want. See lockReusablePriorEnvRoot (MUL-6880).
+	// what focused unit tests want. Also bounds Codex home lease handoff:
+	// both locks can outlive server-side cancellation during provider cleanup.
+	// See lockReusablePriorEnvRoot (MUL-6880).
 	envRootBusyWait time.Duration
 	// executionEnvironmentCommand resolves the killable helper used for
 	// Prepare/Reuse. New always sets it; nil keeps focused unit tests in-process.
@@ -7686,11 +7688,14 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	codexHomeSafeToRelease := true // preparation has not launched a provider yet
 	if provider == "codex" && runtime.GOOS != "windows" {
 		var err error
-		codexHomeLease, err = execenv.ClaimCodexConversationHome(execenv.CodexConversationHomeParams{
+		codexHomeLease, err = d.claimCodexHomeAfterPreviousRun(ctx, execenv.CodexConversationHomeParams{
 			Profile: d.cfg.Profile, WorkspaceID: task.WorkspaceID, TaskID: task.ID,
 			ResumeSessionID: task.PriorSessionID, Task: taskCtx,
 		})
 		if err != nil {
+			if cause := context.Cause(ctx); cause != nil {
+				return TaskResult{}, cause
+			}
 			return TaskResult{}, asEnvironmentSetupFailure(fmt.Errorf("claim Codex conversation home: %w", err))
 		}
 		defer func() {

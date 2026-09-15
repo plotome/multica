@@ -11,11 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/pkg/agent"
 )
 
 func TestRunTaskCodexPersistentHomeTwoTurns(t *testing.T) {
-	for _, mode := range []string{"warm", "cwd-change", "resume-rejected", "rollout-missing", "resume-auth", "unexpected-thread", "retry-config-failure"} {
+	for _, mode := range []string{"warm", "handoff", "cwd-change", "resume-rejected", "rollout-missing", "resume-auth", "unexpected-thread", "retry-config-failure"} {
 		t.Run(mode, func(t *testing.T) { testRunTaskCodexPersistentHomeTwoTurns(t, mode) })
 	}
 }
@@ -69,6 +70,31 @@ done
 	second.PriorSessionID, second.PriorWorkDir = one.SessionID, one.WorkDir
 	second.ProjectDescription = "NEW_PROJECT_CONTEXT"
 	second.ProjectID = "new-project"
+	sameHome := mode == "warm" || mode == "handoff"
+	handoffObserved := false
+	if mode == "handoff" {
+		// Model the interval after server cancellation but before the daemon
+		// releases the prior execution's home. Only the observed busy branch
+		// releases it, so an immediate-failure implementation cannot pass.
+		lease, err := execenv.ClaimCodexConversationHome(execenv.CodexConversationHomeParams{
+			Profile: d.cfg.Profile, WorkspaceID: first.WorkspaceID,
+			TaskID: first.ID, ResumeSessionID: one.SessionID,
+			Task: execenv.TaskContextForEnv{AgentID: first.AgentID, IssueID: first.IssueID, ChatSessionID: first.ChatSessionID},
+		})
+		if err != nil || lease == nil {
+			t.Fatalf("hold prior home: %v", err)
+		}
+		defer lease.Release()
+		d.envRootBusyWait = time.Second
+		d.logger = slog.New(homeHandoffLog{Handler: d.logger.Handler(), onWait: func() {
+			data, err := os.ReadFile(record)
+			if err != nil || len(strings.Split(strings.TrimSpace(string(data)), "\n")) != 1 {
+				t.Fatal("new provider started before prior home was released")
+			}
+			handoffObserved = true
+			lease.Release()
+		}})
+	}
 	if mode == "rollout-missing" {
 		data, err := os.ReadFile(record)
 		if err != nil {
@@ -78,7 +104,7 @@ done
 		if err := os.Remove(filepath.Join(home, "sessions/2026/09/09/rollout-2026-09-09T00-00-00-test-thread.jsonl")); err != nil {
 			t.Fatal(err)
 		}
-	} else if mode != "warm" {
+	} else if !sameHome {
 		// Fresh starts return a new thread; a refused resume must not run
 		// thread/start in the old provider process or reuse its database.
 		script = strings.ReplaceAll(script, "test-thread", "new-thread")
@@ -104,6 +130,9 @@ done
 		}
 	}
 	two, err := d.runTask(context.Background(), second, "codex", 0, d.logger)
+	if mode == "handoff" && !handoffObserved {
+		t.Fatal("runTask bypassed home handoff")
+	}
 	if mode == "retry-config-failure" {
 		if err == nil || !strings.Contains(err.Error(), "prepare fresh Codex home") || two.RetiredSessionID != one.SessionID {
 			t.Fatalf("lost retirement on failed retry preparation: %+v %v", two, err)
@@ -133,7 +162,7 @@ done
 		return
 	}
 	wantSession := one.SessionID
-	if mode != "warm" {
+	if !sameHome {
 		wantSession = "new-thread"
 	}
 	if err != nil || two.Status != "completed" || two.SessionID != wantSession {
@@ -155,7 +184,7 @@ done
 	if len(a) != 4 || len(b) != 4 {
 		t.Fatal("invalid execution record")
 	}
-	if (a[0] == b[0]) != (mode == "warm") || a[1] != first.ID || b[1] != second.ID || a[2] != first.AuthToken || b[2] != second.AuthToken || a[3] == b[3] {
+	if (a[0] == b[0]) != sameHome || a[1] != first.ID || b[1] != second.ID || a[2] != first.AuthToken || b[2] != second.AuthToken || a[3] == b[3] {
 		t.Fatal("home/process/credential invariant failed")
 	}
 	if mode == "resume-rejected" && two.RetiredSessionID != one.SessionID {

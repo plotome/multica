@@ -5,9 +5,12 @@ profile, workspace, agent and issue/chat, with separate generations for fresh
 sessions. Execution roots keep their existing Prepare/Reuse lifecycle;
 subprocesses and task credentials are refreshed per run.
 The daemon holds the conversation's OS lock before configuration preparation
-and until provider process cleanup and transcript collection finish. A second
-concurrent execution is rejected with a setup error, not silently redirected to
-another home. Windows retains task-local homes until process-tree cleanup has
+and until provider process cleanup and transcript collection finish. A follow-up
+waits for a busy lease using the existing prior-workdir handoff budget and retry
+cadence, because server-side cancellation can precede local cleanup. Cancellation
+ends that wait; budget exhaustion is a setup error, never a redirect to another
+home. Quarantined or corrupt state still fails immediately. Windows retains
+task-local homes until process-tree cleanup has
 equivalent confirmation.
 
 ## Ownership and compatibility

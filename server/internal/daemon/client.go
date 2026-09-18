@@ -532,6 +532,10 @@ func (c *Client) ReportTaskMessages(ctx context.Context, taskID string, messages
 }
 
 func (c *Client) CompleteTask(ctx context.Context, taskID, output, branchName, sessionID, workDir string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string) error {
+	return c.completeTaskWithRetrySchedule(ctx, taskID, output, branchName, sessionID, workDir, sessionRolloutMissing, retiredSessionID, durableWorkDir, defaultTerminalRetrySchedule)
+}
+
+func (c *Client) completeTaskWithRetrySchedule(ctx context.Context, taskID, output, branchName, sessionID, workDir string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string, schedule []time.Duration) error {
 	body := map[string]any{"output": output}
 	if branchName != "" {
 		body["branch_name"] = branchName
@@ -551,7 +555,7 @@ func (c *Client) CompleteTask(ctx context.Context, taskID, output, branchName, s
 	if retiredSessionID != "" {
 		body["retired_session_id"] = retiredSessionID
 	}
-	return c.postJSONWithRetry(ctx, fmt.Sprintf("/api/daemon/tasks/%s/complete", taskID), body, nil, defaultTerminalRetrySchedule)
+	return c.postJSONWithRetry(ctx, fmt.Sprintf("/api/daemon/tasks/%s/complete", taskID), body, nil, schedule)
 }
 
 func (c *Client) ReportTaskUsage(ctx context.Context, taskID string, usage []TaskUsageEntry) error {
@@ -564,6 +568,10 @@ func (c *Client) ReportTaskUsage(ctx context.Context, taskID string, usage []Tas
 }
 
 func (c *Client) FailTask(ctx context.Context, taskID, errMsg, sessionID, workDir, branchName, failureReason string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string) error {
+	return c.failTaskWithRetrySchedule(ctx, taskID, errMsg, sessionID, workDir, branchName, failureReason, sessionRolloutMissing, retiredSessionID, durableWorkDir, defaultTerminalRetrySchedule)
+}
+
+func (c *Client) failTaskWithRetrySchedule(ctx context.Context, taskID, errMsg, sessionID, workDir, branchName, failureReason string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string, schedule []time.Duration) error {
 	body := map[string]any{"error": errMsg}
 	if sessionID != "" {
 		body["session_id"] = sessionID
@@ -589,7 +597,7 @@ func (c *Client) FailTask(ctx context.Context, taskID, errMsg, sessionID, workDi
 	if retiredSessionID != "" {
 		body["retired_session_id"] = retiredSessionID
 	}
-	return c.postJSONWithRetry(ctx, fmt.Sprintf("/api/daemon/tasks/%s/fail", taskID), body, nil, defaultTerminalRetrySchedule)
+	return c.postJSONWithRetry(ctx, fmt.Sprintf("/api/daemon/tasks/%s/fail", taskID), body, nil, schedule)
 }
 
 // PinTaskSession persists the agent's session_id and work_dir on the task
@@ -772,8 +780,14 @@ func (c *Client) usesLegacyWorkspaceEndpoint() bool {
 }
 
 // IssueGCStatus holds the minimal issue info returned by the GC check endpoint.
+//
+// Category is the issue's lifecycle (unstarted/started/done/closed) and is what
+// GC decides on. Status is the legacy seven-value enum, still populated by the
+// server for installed daemons and used here only when Category is absent —
+// a server predating MUL-7364 — or unrecognized. See issueGCLifecycle in gc.go.
 type IssueGCStatus struct {
 	Status    string    `json:"status"`
+	Category  string    `json:"category,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -785,6 +799,7 @@ type IssueGCCheckResult struct {
 	ID        string    `json:"id"`
 	Found     bool      `json:"found"`
 	Status    string    `json:"status,omitempty"`
+	Category  string    `json:"category,omitempty"`
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 	Err       error     `json:"-"`
 }
@@ -853,6 +868,7 @@ func (c *Client) getLegacyIssueGCChecks(ctx context.Context, issueIDs []string) 
 			ID:        issueID,
 			Found:     true,
 			Status:    status.Status,
+			Category:  status.Category,
 			UpdatedAt: status.UpdatedAt,
 		}
 	}
@@ -929,6 +945,19 @@ func (c *Client) GetTaskGCCheck(ctx context.Context, taskID string) (*TaskGCStat
 // must be refused with an explanation (MUL-6164).
 const RuntimeOfflineCodeNotExecutable = "not_executable"
 
+// RuntimeOfflineCodeDshProfile marks a runtime taken offline because the DSH
+// runtime profile it depends on is not installed. Like not_executable it is not
+// something waiting fixes on its own — a human installs a bundle, or configures
+// the daemon to — so work for it is refused with an explanation rather than
+// queued forever. The exception is an install the daemon is running right now,
+// which Installing states explicitly.
+//
+// Only an ABSENT profile reaches this code. A profile that is present but
+// answers with a protocol this daemon does not drive never takes a live runtime
+// offline at all: the daemon can be the stale side of that skew, so it reports
+// the incompatibility and leaves the runtime alone.
+const RuntimeOfflineCodeDshProfile = "dsh_profile"
+
 // RuntimeOfflineReason is why a runtime went offline, in the form clients can
 // act on: a stable code they switch on and localize, and the command that
 // repairs the install. Prose stays in Detail for logs — never as the thing a
@@ -937,6 +966,12 @@ type RuntimeOfflineReason struct {
 	Code   string                  `json:"code"`
 	Detail string                  `json:"detail,omitempty"`
 	Repair *agent.ExecFormatRepair `json:"repair,omitempty"`
+	// Installing reports that the daemon has an automatic install in flight for
+	// this runtime. It is the difference between "a human has to act" and "this
+	// comes back by itself", which the server cannot infer from the code alone:
+	// without it, a successful install that is still running would look exactly
+	// like a machine waiting on an operator who was never going to be told.
+	Installing bool `json:"installing,omitempty"`
 }
 
 // Deregister takes runtimes offline. reasons is optional and keyed by runtime

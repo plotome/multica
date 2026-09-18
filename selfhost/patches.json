@@ -51,6 +51,7 @@
         "TestCodexConversationHomeFreshGenerationKeepsLeaseAndBindings",
         "TestExecuteAndDrainPersistentHomeCancellationWaitsForCleanup",
         "TestExecuteAndDrainPersistentHomeTerminalHandoff",
+        "TestPersistentHomeCancellationSharesTerminalResult",
         "TestCodexExecuteCancellationInterruptsTurnAndPreservesUsage",
         "TestCodexConversationHomePreparationHelperTwoTurns",
         "TestCodexConversationHomeInvalidConfigFailsClosed",

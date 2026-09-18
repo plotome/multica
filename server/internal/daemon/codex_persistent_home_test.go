@@ -259,3 +259,48 @@ func TestExecuteAndDrainPersistentHomeTerminalHandoff(t *testing.T) {
 		t.Fatal("terminal observation must not invent process cleanup evidence")
 	}
 }
+
+// Cancellation must collect a single provider result for both terminal status
+// and cleanup evidence, including a non-authoritative cancellation result.
+func TestPersistentHomeCancellationSharesTerminalResult(t *testing.T) {
+	for _, authoritative := range []bool{false, true} {
+		for _, confirmed := range []bool{false, true} {
+			d := newTestDaemon(t)
+			messages := make(chan agent.Message)
+			results := make(chan agent.Result, 1)
+			backend := sessionBackend{session: &agent.Session{
+				Messages: messages, Result: results,
+				TerminalObserved: func() bool { return authoritative },
+			}}
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			got := make(chan agent.Result, 1)
+			go func() {
+				r, _, _ := d.executeAndDrain(ctx, backend, "p", agent.ExecOptions{PersistentCodexHome: true}, slog.Default(), "task", "", new(atomic.Int32))
+				got <- r
+			}()
+			messages <- agent.Message{Type: agent.MessageText, Content: "ready"}
+			cancel()
+			close(messages)
+			select {
+			case <-got:
+				t.Fatal("returned before cleanup evidence")
+			case <-time.After(20 * time.Millisecond):
+			}
+			results <- agent.Result{Status: "failed", Error: "provider terminal error", ProcessCleanupConfirmed: confirmed}
+			close(results)
+			select {
+			case r := <-got:
+				want := "cancelled"
+				if authoritative {
+					want = "failed"
+				}
+				if r.Status != want || r.ProcessCleanupConfirmed != confirmed || (authoritative && r.Error != "provider terminal error") {
+					t.Fatalf("authoritative=%v cleanup=%v: result=%+v", authoritative, confirmed, r)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("result handoff did not finish")
+			}
+		}
+	}
+}

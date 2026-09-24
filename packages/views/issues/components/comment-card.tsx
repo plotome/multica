@@ -2,7 +2,7 @@
 
 import { Fragment, memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle2, ChevronRight, ListChevronsDownUp, Copy, Link2, Loader2, MessageSquarePlus, MoreHorizontal, Pencil, RotateCcw, Trash2 } from "lucide-react";
+import { CheckCircle2, ChevronRight, CornerUpLeft, ListChevronsDownUp, Copy, Link2, Loader2, MessageSquarePlus, MoreHorizontal, Pencil, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Card } from "@multica/ui/components/ui/card";
 import { Button, buttonVariants } from "@multica/ui/components/ui/button";
@@ -51,7 +51,8 @@ import { CommentsFoldBar } from "./resolved-thread-bar";
 import { deriveThreadResolution } from "./thread-utils";
 import { RevisionConflictCompare } from "./revision-conflict-compare";
 import { InlineCommentRun, PlacedInlineCommentRun, useInlineCommentRunState, type InlineCommentRunState } from "./inline-comment-run";
-import { EMPTY_COMMENT_RUNS, type CommentRun } from "./comment-runs";
+import { EMPTY_COMMENT_RUNS, orderThreadWithRuns, type CommentRun, type ThreadRunSlot } from "./comment-runs";
+import { descriptionPreview } from "./description-preview";
 import { useCommentAnnotations } from "./use-comment-annotations";
 import { useRunCommentMotion } from "./use-run-comment-motion";
 
@@ -133,6 +134,8 @@ interface CommentCardProps {
   onResolveToggle?: (commentId: string, resolved: boolean) => void;
   /** Copy a deep link (`#comment-…`) to a single comment in this thread. */
   onCopyLink?: (commentId: string) => void;
+  /** Scroll to and flash a comment in this thread. */
+  onJumpToComment?: (commentId: string) => void;
   /**
    * When non-null, the thread root is currently rendered as a resolved-but-
    * expanded card. Pass a "Collapse" affordance into the header so the user
@@ -660,6 +663,7 @@ function ActiveSupplementReceipt({ issueId, entry }: { issueId: string; entry: T
 function CommentRow({
   runHeader,
   runMetadata,
+  replyTo,
   issueId,
   entry,
   currentUserId,
@@ -676,6 +680,7 @@ function CommentRow({
 }: {
   runHeader?: ReactNode;
   runMetadata?: ReactNode;
+  replyTo?: ReactNode;
   issueId: string;
   entry: TimelineEntry;
   currentUserId?: string;
@@ -781,6 +786,27 @@ function CommentRow({
               }
             />
             <DropdownMenuContent align="end">
+              {/* Groups: act on it (edit, resolve), take it elsewhere, then delete alone. */}
+              {canEditEntry && (
+                <DropdownMenuItem onClick={edit.startEdit}>
+                  <Pencil className="h-3.5 w-3.5" />
+                  {t(($) => $.comment.edit_action)}
+                </DropdownMenuItem>
+              )}
+              {onResolveToggle && (
+                isResolution ? (
+                  <DropdownMenuItem onClick={() => onResolveToggle(entry.id, false)}>
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    {t(($) => $.comment.resolve.unresolve_action)}
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem onClick={() => onResolveToggle(entry.id, true)}>
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    {t(($) => $.comment.resolve.resolve_with_comment_action)}
+                  </DropdownMenuItem>
+                )
+              )}
+              {(canEditEntry || onResolveToggle) && <DropdownMenuSeparator />}
               <DropdownMenuItem onClick={() => {
                 void copyText(entry.content ?? "").then((ok) => {
                   if (ok) toast.success(t(($) => $.comment.copied_toast));
@@ -801,38 +827,13 @@ function CommentRow({
                   {t(($) => $.source_context.create_action)}
                 </DropdownMenuItem>
               )}
-              {onResolveToggle && (
+              {canDeleteEntry && (
                 <>
                   <DropdownMenuSeparator />
-                  {isResolution ? (
-                    <DropdownMenuItem onClick={() => onResolveToggle(entry.id, false)}>
-                      <RotateCcw className="h-3.5 w-3.5" />
-                      {t(($) => $.comment.resolve.unresolve_action)}
-                    </DropdownMenuItem>
-                  ) : (
-                    <DropdownMenuItem onClick={() => onResolveToggle(entry.id, true)}>
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                      {t(($) => $.comment.resolve.resolve_with_comment_action)}
-                    </DropdownMenuItem>
-                  )}
-                </>
-              )}
-              {(canEditEntry || canDeleteEntry) && (
-                <>
-                  <DropdownMenuSeparator />
-                  {canEditEntry && (
-                    <DropdownMenuItem onClick={edit.startEdit}>
-                      <Pencil className="h-3.5 w-3.5" />
-                      {t(($) => $.comment.edit_action)}
-                    </DropdownMenuItem>
-                  )}
-                  {canEditEntry && canDeleteEntry && <DropdownMenuSeparator />}
-                  {canDeleteEntry && (
-                    <DropdownMenuItem onClick={() => setConfirmDelete(true)} variant="destructive">
-                      <Trash2 className="h-3.5 w-3.5" />
-                      {t(($) => $.comment.delete_action)}
-                    </DropdownMenuItem>
-                  )}
+                  <DropdownMenuItem onClick={() => setConfirmDelete(true)} variant="destructive">
+                    <Trash2 className="h-3.5 w-3.5" />
+                    {t(($) => $.comment.delete_action)}
+                  </DropdownMenuItem>
                 </>
               )}
             </DropdownMenuContent>
@@ -845,6 +846,7 @@ function CommentRow({
           />
         </div>
       </StickyHeaderShell>
+      {replyTo && <div className="pl-12 pr-4 max-md:pl-3 max-md:pr-3 pb-1.5">{replyTo}</div>}
 
       {edit.editing ? (
         <div
@@ -958,12 +960,31 @@ function CommentRow({
   );
 }
 
+/** Names the input a run answers once other rows separate the two (MUL-7628). */
+function ReplyToQuote({ entry, onJump }: { entry: TimelineEntry; onJump?: (commentId: string) => void }) {
+  const { t } = useT("issues");
+  const { getActorName } = useActorName();
+  const label = t(($) => $.comment.replying_to, {
+    name: entry.actor_name || getActorName(entry.actor_type, entry.actor_id),
+    preview: descriptionPreview(entry.content ?? ""),
+  });
+  return (
+    <button type="button" disabled={!onJump} onClick={() => onJump?.(entry.id)} title={label}
+      className="flex max-w-full min-w-0 items-center gap-1.5 rounded-xs text-left text-caption text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:hover:text-muted-foreground">
+      <CornerUpLeft aria-hidden className="size-3 shrink-0" />
+      <span className="min-w-0 truncate">{label}</span>
+    </button>
+  );
+}
+
 /** A run without a persisted reply still belongs to the agent, never its trigger author. */
-export function AgentRunComment({ run, standalone = false, commentProps, entering = false }: {
+export function AgentRunComment({ run, standalone = false, commentProps, entering = false, replyTo }: {
   run: CommentRun;
   standalone?: boolean;
   entering?: boolean;
   commentProps?: CommentCardProps;
+  /** The input this run answers, shown when the thread no longer places the two together. */
+  replyTo?: ReactNode;
 }) {
   const viewState = useInlineCommentRunState();
   const replyEntry = commentProps?.entry;
@@ -985,10 +1006,11 @@ export function AgentRunComment({ run, standalone = false, commentProps, enterin
         <CommentRow {...commentProps}
           isHighlighted={commentProps.highlightedCommentId === reply?.id}
           isResolution={!!reply?.resolved_at}
+          replyTo={replyTo}
           runHeader={<PlacedInlineCommentRun run={run} viewState={viewState} presentation="header" />}
           runMetadata={<PlacedInlineCommentRun run={run} viewState={viewState} />} />
       ) : <div className="px-4 max-md:px-3">
-        <InlineCommentRun run={run} viewState={viewState} showIdentity />
+        <InlineCommentRun run={run} viewState={viewState} showIdentity replyTo={replyTo} />
       </div>}
     </div>
   );
@@ -1022,6 +1044,7 @@ function CommentCardImpl({
   onCreateSubIssue,
   onResolveToggle,
   onCopyLink,
+  onJumpToComment,
   onCollapseResolved,
   expandedResolvedIds,
   onResolvedExpandChange,
@@ -1065,35 +1088,25 @@ function CommentCardImpl({
   // over. Every tombstone has at least one live descendant (the server prunes
   // one that loses its last reply), so no content hides behind this.
   const visibleReplies = allNestedReplies.filter((reply) => !isDeletedComment(reply));
-  // A run anchored here renders in one slot after its input, ending with its
-  // reply (the run's latest comment). The rest of what the run posted in this
-  // thread joins that slot in posting order; left in the chronological list,
-  // it would render after the reply it preceded (MUL-7548).
-  const slottedRuns = runs.filter((run) => run.hasReply && run.anchorCommentId && run.commentId !== entry.id);
-  const runOutputs = new Map(slottedRuns.map((run) => [run.task.id,
-    allNestedReplies.filter((reply) => reply.actor_type === "agent" && reply.source_task_id === run.task.id)]));
-  const slottedReplyIds = new Set(slottedRuns.flatMap((run) =>
-    [run.commentId, ...(runOutputs.get(run.task.id) ?? []).map((reply) => reply.id)]));
   const renderRuns = (commentId: string, presentation: "inline" | "header" = "inline") => runs.filter((run) => run.commentId === commentId && run.hasReply
     && (!run.anchorCommentId || run.anchorCommentId === commentId || replyFolded))
     .map((run) => <PlacedInlineCommentRun key={run.task.id} run={run} presentation={presentation} viewState={run.commentId === entry.id ? runViewState : undefined} />);
 
-  const renderAnchoredRuns = (commentId: string) => runs.filter((run) => run.anchorCommentId === commentId
-    && !(replyFolded && run.hasReply))
-    .map((run) => {
-      const reply = run.hasReply ? allNestedReplies.find((entry) => entry.id === run.commentId) : undefined;
-      return <Fragment key={run.task.id}>
-        {runOutputs.get(run.task.id)?.filter((output) => output.id !== run.commentId).map(renderReply)}
-        <AgentRunComment run={run} entering={enteringRunIds?.has(run.task.id)} commentProps={reply ? {
-          issueId, entry: reply, replies: [], currentUserId, canModerate, onReply, onEdit, onDelete,
-          onToggleReaction, onCreateSubIssue, onResolveToggle, onCopyLink, highlightedCommentId, enteringRunIds,
-        } : undefined} />{reply && reply.id !== commentId && renderAnchoredRuns(reply.id)}</Fragment>;
-    });
+  // A run slot renders the run's latest comment, or its activity until it
+  // posts one.
+  const renderThreadRow = (row: TimelineEntry | ThreadRunSlot) => "run" in row ? (
+    <AgentRunComment key={row.run.task.id} run={row.run} entering={enteringRunIds?.has(row.run.task.id)}
+      replyTo={row.replyTo && <ReplyToQuote entry={row.replyTo} onJump={onJumpToComment} />}
+      commentProps={row.reply ? {
+        issueId, entry: row.reply, replies: [], currentUserId, canModerate, onReply, onEdit, onDelete,
+        onToggleReaction, onCreateSubIssue, onResolveToggle, onCopyLink, highlightedCommentId, enteringRunIds,
+      } : undefined} />
+  ) : renderReply(row);
 
   const renderReply = (reply: TimelineEntry) => (
     <Fragment key={reply.id}>
-      {/* A tombstone keeps its place in the walk — runs anchored to
-          it still render — but contributes no row of its own. */}
+      {/* A tombstone keeps its place in the thread but contributes no row
+          of its own. */}
       {!isDeletedComment(reply) && (
         <div
           id={`comment-${reply.id}`}
@@ -1121,7 +1134,6 @@ function CommentCardImpl({
           />
         </div>
       )}
-      {renderAnchoredRuns(reply.id)}
     </Fragment>
   );
 
@@ -1147,6 +1159,12 @@ function CommentCardImpl({
   const resolutionReply = replyResolutionId
     ? allNestedReplies.find((r) => r.id === replyResolutionId) ?? null
     : null;
+  // Replies and run slots in the order they happened (MUL-7628). Folded, the
+  // resolution stays visible along with any run that has not replied yet.
+  const threadRows = replyFolded
+    ? orderThreadWithRuns(entry, resolutionReply ? [resolutionReply] : [], runs.filter((run) => !run.hasReply
+      && (run.anchorCommentId === entry.id || run.anchorCommentId === replyResolutionId)))
+    : orderThreadWithRuns(entry, allNestedReplies, runs);
 
   // Pin the root comment's header to the timeline's scroll parent while the
   // thread is open, so a LONG root comment keeps its author + actions visible
@@ -1275,6 +1293,29 @@ function CommentCardImpl({
                       }
                     />
                     <DropdownMenuContent align="end">
+                      {/* Groups: act on it (edit, resolve), take it elsewhere, then delete alone. */}
+                      {canEditEntry && (
+                        <DropdownMenuItem onClick={edit.startEdit}>
+                          <Pencil className="h-3.5 w-3.5" />
+                          {t(($) => $.comment.edit_action)}
+                        </DropdownMenuItem>
+                      )}
+                      {onResolveToggle && (
+                        <DropdownMenuItem onClick={() => onResolveToggle(entry.id, !entry.resolved_at)}>
+                          {entry.resolved_at ? (
+                            <>
+                              <RotateCcw className="h-3.5 w-3.5" />
+                              {t(($) => $.comment.resolve.unresolve_thread_action)}
+                            </>
+                          ) : (
+                            <>
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              {t(($) => $.comment.resolve.resolve_thread_action)}
+                            </>
+                          )}
+                        </DropdownMenuItem>
+                      )}
+                      {(canEditEntry || onResolveToggle) && <DropdownMenuSeparator />}
                       <DropdownMenuItem onClick={() => {
                         void copyText(entry.content ?? "").then((ok) => {
                           if (ok) toast.success(t(($) => $.comment.copied_toast));
@@ -1295,40 +1336,13 @@ function CommentCardImpl({
                           {t(($) => $.source_context.create_action)}
                         </DropdownMenuItem>
                       )}
-                      {onResolveToggle && (
+                      {canDeleteEntry && (
                         <>
                           <DropdownMenuSeparator />
-                          <DropdownMenuItem onClick={() => onResolveToggle(entry.id, !entry.resolved_at)}>
-                            {entry.resolved_at ? (
-                              <>
-                                <RotateCcw className="h-3.5 w-3.5" />
-                                {t(($) => $.comment.resolve.unresolve_thread_action)}
-                              </>
-                            ) : (
-                              <>
-                                <CheckCircle2 className="h-3.5 w-3.5" />
-                                {t(($) => $.comment.resolve.resolve_thread_action)}
-                              </>
-                            )}
+                          <DropdownMenuItem onClick={() => setConfirmDelete(true)} variant="destructive">
+                            <Trash2 className="h-3.5 w-3.5" />
+                            {t(($) => $.comment.delete_action)}
                           </DropdownMenuItem>
-                        </>
-                      )}
-                      {(canEditEntry || canDeleteEntry) && (
-                        <>
-                          <DropdownMenuSeparator />
-                          {canEditEntry && (
-                            <DropdownMenuItem onClick={edit.startEdit}>
-                              <Pencil className="h-3.5 w-3.5" />
-                              {t(($) => $.comment.edit_action)}
-                            </DropdownMenuItem>
-                          )}
-                          {canEditEntry && canDeleteEntry && <DropdownMenuSeparator />}
-                          {canDeleteEntry && (
-                            <DropdownMenuItem onClick={() => setConfirmDelete(true)} variant="destructive">
-                              <Trash2 className="h-3.5 w-3.5" />
-                              {t(($) => $.comment.delete_action)}
-                            </DropdownMenuItem>
-                          )}
                         </>
                       )}
                     </DropdownMenuContent>
@@ -1466,7 +1480,6 @@ function CommentCardImpl({
             to mirror the body Panel's collapse visibility. */}
         {open && (
           <>
-          {renderAnchoredRuns(entry.id)}
           {replyFolded ? (
             <>
               {/* reply-mode folded: other replies behind a bar, resolution pinned below */}
@@ -1478,36 +1491,7 @@ function CommentCardImpl({
                   />
                 </div>
               )}
-              {resolutionReply && (
-                <>
-                  <div
-                    id={`comment-${resolutionReply.id}`}
-                    className={cn(
-                      "border-t border-border/50 transition-colors duration-700",
-                      highlightedCommentId === resolutionReply.id && highlightedCommentBackgroundClass,
-                    )}
-                  >
-                    <CommentRow
-                      issueId={issueId}
-                      entry={resolutionReply}
-                      runHeader={renderRuns(resolutionReply.id, "header")}
-                      runMetadata={renderRuns(resolutionReply.id)}
-                      currentUserId={currentUserId}
-                      canModerate={canModerate}
-                      isResolution
-                      isHighlighted={highlightedCommentId === resolutionReply.id}
-                      hasReplies={repliedToIds.has(resolutionReply.id)}
-                      onEdit={onEdit}
-                      onDelete={onDelete}
-                      onToggleReaction={onToggleReaction}
-                      onCreateSubIssue={onCreateSubIssue}
-                      onResolveToggle={onResolveToggle}
-                      onCopyLink={onCopyLink}
-                    />
-                  </div>
-                  {renderAnchoredRuns(resolutionReply.id)}
-                </>
-              )}
+              {threadRows.map(renderThreadRow)}
             </>
           ) : (
             <>
@@ -1524,7 +1508,7 @@ function CommentCardImpl({
                 </button>
               )}
               {/* Replies — chronological; the resolution keeps its place with a badge */}
-              {allNestedReplies.filter((reply) => !slottedReplyIds.has(reply.id)).map(renderReply)}
+              {threadRows.map(renderThreadRow)}
 
               {/* Reply input */}
               <div className="border-t border-border/50 px-4 max-md:px-3 py-2.5">

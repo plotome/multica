@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { AlertCircle, Brain, ChevronRight, CirclePause, Clock3, ExternalLink, Loader2, MessageSquare, MessageSquarePlus, RotateCcw, ScrollText, Send, Square, Terminal } from "lucide-react";
 import { toast } from "sonner";
 import { useWorkspaceId } from "@multica/core/hooks";
@@ -64,12 +64,14 @@ export function PlacedInlineCommentRun({ presentation = "inline", ...props }: Pa
   return <InlineCommentRun {...props} presentation={presentation} />;
 }
 
-export function InlineCommentRun({ run, className, viewState, showIdentity = false, presentation = "inline" }: {
+export function InlineCommentRun({ run, className, viewState, showIdentity = false, presentation = "inline", replyTo }: {
   run: CommentRun;
   className?: string;
   viewState?: InlineCommentRunState;
   showIdentity?: boolean;
   presentation?: "inline" | "header";
+  /** The input this run answers, under its identity like a reply's. */
+  replyTo?: ReactNode;
 }) {
   const { task, hasReply } = run;
   const { t } = useT("issues");
@@ -247,6 +249,7 @@ export function InlineCommentRun({ run, className, viewState, showIdentity = fal
         </Button>}
       </div>
       <div className={cn(showIdentity && "pl-8")}>
+        {replyTo}
         {supplementDraft?.open && <div className="mt-2 space-y-2 rounded-md border bg-muted/20 p-2"
           onKeyDown={(event) => {
             if (event.key === "Escape") {

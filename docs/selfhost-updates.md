@@ -33,6 +33,10 @@ copying its files without preserving ancestry is not the repair.
    the race detector and real-agent CLI guard. Run additional tests warranted
    by the change. Verify default configuration, not only an opt-in test setup.
    Record baseline failures explicitly; do not call a failing suite green.
+   On macOS, the entry point gives its test subprocess tree application
+   scheduling with `taskpolicy -a`. A launchd Background daemon otherwise
+   passes timer coalescing to fixtures, invalidating subsecond timing checks.
+   This does not change the running daemon's policy or the test deadlines.
 5. Open the fork PR with the retained/changed/retired capability list and test
    evidence. Merge normally with the reviewed head pinned; do not bypass branch
    protection. Verify the merged tree matches the tested tree and rerun the

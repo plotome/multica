@@ -14,7 +14,14 @@ cd "$SCRIPT_DIR/../server"
 # Whole packages avoid silently omitting newly added regression test names.
 # Do not leak the invoking task's credentials or config-root overrides into
 # tests. Preserve the real HOME for the Go cache; test fixtures own their homes.
-env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" \
+test_policy=()
+if [ "$(uname -s)" = Darwin ]; then
+  # launchd Background jobs impose timer coalescing on descendants: a fixture's
+  # 20ms sleep can take 220ms. Give only this test tree application scheduling;
+  # do not change the daemon or relax the provider's timing assertions.
+  test_policy=(/usr/sbin/taskpolicy -a)
+fi
+"${test_policy[@]}" env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" \
   "$SCRIPT_DIR/go-test-with-agent-cli-guard.sh" -- \
   go test -race -p 2 -parallel 2 \
   ./internal/daemon ./internal/daemon/execenv ./internal/daemon/repocache ./pkg/agent \

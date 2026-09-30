@@ -65,6 +65,18 @@
         "TestCodexPersistentHomeNeverFallsBackFromResume",
         "TestCodexPersistentHomeReportsProcessCleanup"
       ]
+    },
+    {
+      "id": "codex-hook-trust-rehome",
+      "introduced_by": "e556eb5c7de4b2e3fb51873241f453c425e1ee83",
+      "required_files": ["server/internal/daemon/execenv/codex_hook_trust.go"],
+      "required_tests": [
+        "TestRehomeCodexHookTrust",
+        "TestRehomeCodexHookTrustSymlinkedHomes",
+        "TestRehomeCodexHookTrustIdempotentAndBounded",
+        "TestPrepareCodexHomeRehomesHookTrustOnReuse",
+        "TestSanitizeCopiedCodexConfigRefusesInvalidRehome"
+      ]
     }
   ]
 }

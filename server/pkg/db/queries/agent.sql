@@ -281,13 +281,13 @@ ORDER BY id
 FOR UPDATE;
 
 -- name: ListNonOwnerAgentsByRuntime :many
--- Returns every agent bound to a runtime whose owner differs from its owner,
--- including hidden Builder execution carriers. This is the dependency plan shown before a public
--- runtime is made private: owner-owned agents keep their binding, while every
--- teammate-owned agent loses machine access.
+-- Returns bound agents whose owners lose access under the desired shared_with
+-- list, including hidden Builder execution carriers. Runtime-owner agents keep
+-- their binding.
 SELECT * FROM agent
 WHERE runtime_id = @runtime_id
   AND owner_id IS DISTINCT FROM @runtime_owner_id
+  AND NOT COALESCE(owner_id = ANY(@shared_with::uuid[]), false)
 ORDER BY name ASC;
 
 -- name: ListNonOwnerAgentsByRuntimeForUpdate :many
@@ -296,6 +296,7 @@ ORDER BY name ASC;
 SELECT * FROM agent
 WHERE runtime_id = @runtime_id
   AND owner_id IS DISTINCT FROM @runtime_owner_id
+  AND NOT COALESCE(owner_id = ANY(@shared_with::uuid[]), false)
 ORDER BY id
 FOR UPDATE NOWAIT;
 
@@ -685,9 +686,16 @@ WHERE id = $1;
 -- Hot-path status polling needs only the task status and the owning agent's
 -- workspace for authorization. Keep this independent of optional source links
 -- (issue, chat session, autopilot run) so it needs no source-entity lookup.
-SELECT atq.status, a.workspace_id
+-- The bound runtime's workspace / daemon / owner ride along (LEFT JOIN: a
+-- terminal task outlives a deleted runtime) so the daemon route can enforce
+-- runtime ownership without a second round trip (MUL-8154).
+SELECT atq.status, a.workspace_id, atq.runtime_id,
+       rt.workspace_id AS runtime_workspace_id,
+       rt.daemon_id AS runtime_daemon_id,
+       rt.owner_id AS runtime_owner_id
 FROM agent_task_queue atq
 JOIN agent a ON a.id = atq.agent_id
+LEFT JOIN agent_runtime rt ON rt.id = atq.runtime_id
 WHERE atq.id = $1;
 
 -- name: GetAgentTaskForDelegatedFailureUpdate :one
@@ -872,6 +880,7 @@ WHERE id = (
                         r.owner_id IS NULL
                         OR a.owner_id IS NULL
                         OR r.owner_id = a.owner_id
+                        OR a.owner_id = ANY(r.shared_with)
                     )
                 )
             )
@@ -919,6 +928,7 @@ WHERE id IN (
                         r.owner_id IS NULL
                         OR a.owner_id IS NULL
                         OR r.owner_id = a.owner_id
+                        OR a.owner_id = ANY(r.shared_with)
                     )
                 )
             )

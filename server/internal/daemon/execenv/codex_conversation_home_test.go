@@ -303,12 +303,88 @@ func TestPruneCodexConversationHomes(t *testing.T) {
 	if n, _ := PruneCodexConversationHomes("other", time.Hour, now, testLogger()); n != 0 {
 		t.Fatal("cross-profile GC")
 	}
-	if n, _ := PruneCodexConversationHomes(p.Profile, time.Hour, now, testLogger()); n != 1 {
-		t.Fatalf("pruned %d homes", n)
+	if n, _ := PruneCodexConversationHomes(p.Profile, time.Hour, now, testLogger()); n != 0 {
+		t.Fatalf("pruned %d bound homes", n)
 	}
 	p.ResumeSessionID = "thread"
-	if _, err := ClaimCodexConversationHome(p); err == nil {
-		t.Fatal("GC loss treated as legacy resume")
+	resumed, err := ClaimCodexConversationHome(p)
+	if err != nil {
+		t.Fatalf("GC broke durable resume: %v", err)
+	}
+	defer resumed.Release()
+	if resumed.Home() != a.Home() {
+		t.Fatal("resume changed the bound home")
+	}
+}
+
+func TestPruneCodexConversationHomesUnboundGeneration(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	p := conversationHomeParams()
+	lease, err := ClaimCodexConversationHome(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.BindSession("thread"); err != nil {
+		t.Fatal(err)
+	}
+	bound := lease.Home()
+	if err := lease.StartFreshGeneration(); err != nil {
+		t.Fatal(err)
+	}
+	unbound := lease.Home()
+	lease.Release()
+	if n, _ := PruneCodexConversationHomes(p.Profile, time.Hour, time.Now(), testLogger()); n != 0 {
+		t.Fatal("pruned recent unbound generation")
+	}
+	if n, _ := PruneCodexConversationHomes(p.Profile, time.Hour, time.Now().Add(48*time.Hour), testLogger()); n != 1 {
+		t.Fatalf("pruned %d homes, want only the expired unbound generation", n)
+	}
+	if _, err := os.Stat(bound); err != nil {
+		t.Fatalf("bound home lost: %v", err)
+	}
+	if _, err := os.Stat(unbound); !os.IsNotExist(err) {
+		t.Fatalf("unbound home retained: %v", err)
+	}
+}
+
+func TestPruneCodexConversationHomesDamagedBindings(t *testing.T) {
+	for _, kind := range []string{"invalid-json", "invalid-generation", "linked-binding", "missing-bindings", "linked-bindings", "unexpected-file"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("CODEX_HOME", t.TempDir())
+			p := conversationHomeParams()
+			lease, err := ClaimCodexConversationHome(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			home, root := lease.Home(), lease.root
+			lease.Release()
+			bindings := filepath.Join(root, "bindings")
+			binding := filepath.Join(bindings, codexStateDigest("thread")+".json")
+			switch kind {
+			case "invalid-json":
+				err = os.WriteFile(binding, []byte("{"), 0o600)
+			case "invalid-generation":
+				err = os.WriteFile(binding, []byte(`{"generation":"../outside"}`), 0o600)
+			case "linked-binding":
+				err = os.Symlink(filepath.Join(t.TempDir(), "missing"), binding)
+			case "missing-bindings", "linked-bindings":
+				err = os.Remove(bindings)
+				if err == nil && kind == "linked-bindings" {
+					err = os.Symlink(t.TempDir(), bindings)
+				}
+			case "unexpected-file":
+				err = os.WriteFile(filepath.Join(bindings, "x"), []byte("unknown"), 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n, _ := PruneCodexConversationHomes(p.Profile, time.Hour, time.Now().Add(48*time.Hour), testLogger()); n != 0 {
+				t.Fatal("GC deleted a home without trustworthy binding state")
+			}
+			if _, err := os.Stat(home); err != nil {
+				t.Fatalf("home lost: %v", err)
+			}
+		})
 	}
 }
 

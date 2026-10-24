@@ -2,6 +2,24 @@
   "schema_version": 1,
   "patches": [
     {
+      "id": "owner-runtime-environment-manifest",
+      "introduced_by": "58130e2f98c9b5175e0523c46a0c78584a5665e0",
+      "required_files": ["server/internal/daemon/execenv/runtime_manifest.go"],
+      "required_tests": ["TestRuntimeEnvManifest"]
+    },
+    {
+      "id": "device-owner-application-approvals",
+      "introduced_by": "58130e2f98c9b5175e0523c46a0c78584a5665e0",
+      "required_files": ["server/internal/daemon/task_elicitation.go", "server/pkg/agent/codex_elicitation.go", "docs/runtime-application-approval.md"],
+      "required_tests": [
+        "TestTaskElicitationForwardAndCancel",
+        "TestCodexElicitationHumanResponseAndCancellation",
+        "TestCodexElicitationRejectsStaleTurnAndForgedResponse",
+        "TestTaskElicitationOwnerOnlyReplayAndScope",
+        "TestTaskElicitationCancellationAndTerminal"
+      ]
+    },
+    {
       "id": "persistent-conversation-worktrees",
       "introduced_by": "4eadd28b3c588d38ebe8d83820b1ec17fa151a79",
       "required_files": ["server/internal/daemon/execenv/persistent_local_worktree.go"],

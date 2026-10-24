@@ -375,3 +375,25 @@ State-changing (require an explicit instruction — do not run speculatively):
   unknown provider-level literal is — model-specific gaps fail at run time.
 - "`set` and `add` are interchangeable for skills." `set` replaces all
   bindings; using it when you meant `add` silently removes capabilities.
+
+### Runtime-generated environment and application approval
+
+Codex snapshots exact environment names for each task. A runtime that creates
+additional names later needs an owner-managed `CODEX_RUNTIME_ENV_MANIFEST` in
+agent env: `{"schema":1,"id":"reviewed-runtime-version","names":["EXACT_NAME"]}`.
+This is off by default. Only persisted agent env is authoritative; inherited or
+process-local copies do not enable it. Names must be uppercase and exact;
+credentials, wildcards and environment/sandbox controls are rejected. Values
+are produced by the runtime itself. Review a new manifest before enabling it;
+do not invent trusted-service data or expand the untrusted worker allowlist.
+Agent credentials cannot set this manifest through agent creation or env APIs.
+
+Native computer-use MCP application requests in Codex require the human device
+owner's choice in the run transcript (Web or Desktop). The original message,
+application, warnings and request details are shown; persistent choices appear
+only when offered by the original runtime. Closing the transcript does not
+approve or cancel; use **Cancel request** or stop the run. Unsupported forms,
+missing human routing and connection failures cancel explicitly. There is no
+agent-accessible approval command and no automatic grant. Stop/Interrupt use the
+same Codex connection; the native adapter's trusted lifecycle hooks must also
+be installed. MCP registration alone does not establish cleanup parity.

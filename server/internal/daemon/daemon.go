@@ -9619,6 +9619,12 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 	agentCtx, agentCancel := context.WithCancel(ctx)
 	defer agentCancel()
 
+	var humanApprovalPending atomic.Int32
+	opts.Elicitation = func(approvalCtx context.Context, request json.RawMessage) (json.RawMessage, error) {
+		humanApprovalPending.Add(1)
+		defer humanApprovalPending.Add(-1)
+		return d.requestTaskElicitation(approvalCtx, taskID, request, taskLog)
+	}
 	session, err := backend.Execute(agentCtx, prompt, opts)
 	if err != nil {
 		cleanupConfirmed := opts.PersistentCodexHome && agent.CodexProcessNeverStarted(err)
@@ -9715,6 +9721,17 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 			}
 			return count
 		}
+	}
+	// Human response latency is not a hung provider. Refresh both idle and
+	// tool silence budgets while a real request is pending; the configured
+	// overall task deadline remains in force.
+	nativeWatchdogToolCount := watchdogToolCount
+	watchdogToolCount = func() int32 {
+		count := nativeWatchdogToolCount()
+		if humanApprovalPending.Load() > 0 {
+			lastActivityAt.Store(int64(awakeclock.Now()))
+		}
+		return count
 	}
 	// A backend that can prove its outcome is already decided outranks every
 	// liveness policy below: a run whose terminal result has been read is not a
@@ -10979,6 +10996,21 @@ func configureCodexTaskShellEnvironment(provider, codexHome string, inherited []
 	}
 	authorizedExplicit := codexShellAuthorizedCustomEnvNames(agentCustomEnv)
 	includeOnly := execenv.CodexShellEnvAllowlist(inherited, agentEnv, authorizedExplicit)
+	lateNames, err := execenv.RuntimeEnvNames(agentCustomEnv)
+	if err != nil {
+		return fmt.Errorf("configure Codex shell environment: %w", err)
+	}
+	seen := make(map[string]bool, len(includeOnly))
+	for _, name := range includeOnly {
+		seen[strings.ToUpper(name)] = true
+	}
+	for _, name := range lateNames {
+		if !seen[name] {
+			includeOnly = append(includeOnly, name)
+			seen[name] = true
+		}
+	}
+	sort.Strings(includeOnly)
 	configPath := filepath.Join(codexHome, "config.toml")
 	if err := execenv.EnsureCodexShellEnvPolicyConfig(configPath, includeOnly, logger); err != nil {
 		return fmt.Errorf("configure Codex shell environment: %w", err)

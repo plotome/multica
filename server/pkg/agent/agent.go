@@ -24,6 +24,9 @@ type Backend interface {
 
 // ExecOptions configures a single execution.
 type ExecOptions struct {
+	// Elicitation forwards an original MCP application approval to its human owner.
+	// Nil cancels the request. The callback must return when ctx is cancelled.
+	Elicitation func(context.Context, json.RawMessage) (json.RawMessage, error)
 	// EnableTaskSupplement installs provider hooks only for runs whose daemon/server
 	// capability handshake enabled additional messages.
 	EnableTaskSupplement bool

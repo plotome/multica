@@ -1,3 +1,4 @@
+import { taskElicitationListSchema, type TaskElicitation, type ElicitationChoice } from "../agents/elicitation-schema";
 import type { ZodType } from "zod";
 import { AgentRuntimeSchema, EMPTY_RUNTIME } from "../runtimes/schema";
 import type { IssueWakeup, IssueWakeupInput, IssueWakeupSummaryRow, PausedWakeup, SystemWakeup, WakeupRun, WorkspaceSystemWakeup } from "../types/issue-wakeup";
@@ -2856,6 +2857,15 @@ export class ApiClient {
 
   async getActiveTasksForIssue(issueId: string): Promise<{ tasks: AgentTask[] }> {
     return this.fetch(`/api/issues/${issueId}/active-task`);
+  }
+
+  async listTaskElicitations(taskId: string): Promise<TaskElicitation[]> {
+    const raw = await this.fetch<unknown>(`/api/tasks/${taskId}/elicitations`);
+    return parseWithFallback(raw, taskElicitationListSchema, [], { endpoint: "GET /api/tasks/:id/elicitations" });
+  }
+
+  async respondTaskElicitation(taskId: string, id: string, choice: ElicitationChoice): Promise<void> {
+    await this.fetch(`/api/tasks/${taskId}/elicitations/${id}/respond`, { method: "POST", body: JSON.stringify({ choice }) });
   }
 
   async listTaskMessages(taskId: string): Promise<TaskMessagePayload[]> {

@@ -1297,6 +1297,8 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 	}
 
 	c = &codexClient{
+		runContext:               runCtx,
+		onElicitation:            opts.Elicitation,
 		cfg:                      b.cfg,
 		stdin:                    stdin,
 		pending:                  make(map[int]*pendingRPC),
@@ -1405,6 +1407,7 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 	var cleanupWaitErr error
 	drainAndWait := func() {
 		waitOnce.Do(func() {
+			c.cancelElicitations(true)
 			stdin.Close()
 
 			grace := codexGracefulShutdown()
@@ -1753,6 +1756,9 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 				lastSemanticActivity = time.Now()
 				lastSemanticActivityDescription = activity
 				resetTimer(semanticTimer, semanticInactivityTimeout)
+				if activity == "elicitation:resolved" && firstTurnNoProgressTimer != nil {
+					resetTimer(firstTurnNoProgressTimer, firstTurnNoProgressTimeout)
+				}
 				if activity == "status:running" && !firstTurnStarted {
 					firstTurnStarted = true
 					firstItemWait.start(time.Now(), c.activeTurnID())
@@ -1768,6 +1774,10 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 					stopFirstTurnNoProgressTimer()
 				}
 			case <-firstTurnNoProgressTimerC:
+				if c.hasPendingElicitation() {
+					resetTimer(firstTurnNoProgressTimer, firstTurnNoProgressTimeout)
+					continue
+				}
 				waitingForTurn = false
 				finishFirstItemWait("no_progress_timeout")
 				finalStatus = "timeout"
@@ -1788,6 +1798,10 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 					"last_activity", lastSemanticActivityDescription,
 				)
 			case <-semanticTimer.C:
+				if c.hasPendingElicitation() {
+					resetTimer(semanticTimer, semanticInactivityTimeout)
+					continue
+				}
 				waitingForTurn = false
 				finishFirstItemWait("semantic_inactivity_timeout")
 				finalStatus = "timeout"
@@ -1849,6 +1863,8 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 		// window expires. A clean shutdown lets codex flush OTEL telemetry;
 		// a stuck process is killed via the process-group SIGKILL.
 		drainAndWait()
+		c.cancelElicitations(false)
+		c.elicitationWG.Wait()
 
 		if processExitErr != nil {
 			finalError = withAgentStderr(processExitErr.Error(), "codex", sanitizeCodexDiagnostic(stderrBuf.Tail()))
@@ -2410,6 +2426,13 @@ func describeCodexSemanticActivity(msg Message) string {
 // ── codexClient: JSON-RPC 2.0 transport ──
 
 type codexClient struct {
+	elicitationsClosed     bool
+	writeMu                sync.Mutex
+	runContext             context.Context
+	onElicitation          func(context.Context, json.RawMessage) (json.RawMessage, error)
+	elicitationMu          sync.Mutex
+	elicitations           map[string]codexElicitation
+	elicitationWG          sync.WaitGroup
 	cfg                    Config
 	stdin                  interface{ Write([]byte) (int, error) }
 	mu                     sync.Mutex
@@ -2679,6 +2702,7 @@ func codexRequestContextError(ctx context.Context) error {
 // reached that authoritative completion boundary; callers must force-stop the
 // process tree when it is false.
 func interruptCodexTurn(c *codexClient, threadID string, turnDone <-chan bool, configuredTimeout time.Duration, logger *slog.Logger) bool {
+	c.cancelElicitations(true)
 	select {
 	case <-turnDone:
 		// Completion won the cancellation race; usage has already been captured.
@@ -2762,7 +2786,7 @@ func (c *codexClient) request(ctx context.Context, method string, params any) (j
 		return nil, err
 	}
 	data = append(data, '\n')
-	if _, err := c.stdin.Write(data); err != nil {
+	if _, err := c.writeRPC(data); err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
@@ -2811,10 +2835,10 @@ func (c *codexClient) notify(method string) {
 	}
 	data, _ := json.Marshal(msg)
 	data = append(data, '\n')
-	_, _ = c.stdin.Write(data)
+	_, _ = c.writeRPC(data)
 }
 
-func (c *codexClient) respond(id int, result any) {
+func (c *codexClient) respond(id any, result any) {
 	msg := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,
@@ -2822,10 +2846,10 @@ func (c *codexClient) respond(id int, result any) {
 	}
 	data, _ := json.Marshal(msg)
 	data = append(data, '\n')
-	_, _ = c.stdin.Write(data)
+	_, _ = c.writeRPC(data)
 }
 
-func (c *codexClient) respondError(id int, code int, message string) {
+func (c *codexClient) respondError(id any, code int, message string) {
 	msg := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,
@@ -2836,7 +2860,7 @@ func (c *codexClient) respondError(id int, code int, message string) {
 	}
 	data, _ := json.Marshal(msg)
 	data = append(data, '\n')
-	_, _ = c.stdin.Write(data)
+	_, _ = c.writeRPC(data)
 }
 
 func (c *codexClient) closeAllPending(err error) {
@@ -2849,6 +2873,7 @@ func (c *codexClient) closeAllPending(err error) {
 }
 
 func (c *codexClient) markProcessExited(err error) {
+	c.cancelElicitations(false)
 	if err == nil {
 		err = errCodexProcessExited
 	}
@@ -2965,8 +2990,7 @@ func (c *codexClient) handleResponse(raw map[string]json.RawMessage) {
 }
 
 func (c *codexClient) handleServerRequest(raw map[string]json.RawMessage) {
-	var id int
-	_ = json.Unmarshal(raw["id"], &id)
+	id := raw["id"]
 
 	var method string
 	_ = json.Unmarshal(raw["method"], &method)
@@ -2980,7 +3004,7 @@ func (c *codexClient) handleServerRequest(raw map[string]json.RawMessage) {
 	case "item/permissions/requestApproval":
 		c.respond(id, codexPermissionsApprovalResponse(raw["params"], c.cfg.Logger))
 	case "mcpServer/elicitation/request":
-		c.respond(id, map[string]any{"action": "accept", "content": nil, "_meta": nil})
+		c.handleElicitation(id, raw["params"])
 	default:
 		msg := fmt.Sprintf("unsupported codex app-server request: %s", method)
 		c.cfg.Logger.Warn("codex: unhandled server request", "method", method, "id", id)
@@ -3043,6 +3067,10 @@ func (c *codexClient) handleNotification(raw map[string]json.RawMessage) {
 	// it first can replace the main turn ID and make subsequent main-thread
 	// items/completion look stale.
 	if c.isNotificationFromOtherThread(params) {
+		return
+	}
+	if method == "serverRequest/resolved" {
+		c.resolveElicitation(params)
 		return
 	}
 	if c.acceptNotification != nil && !c.acceptNotification(method, params) {
@@ -3499,12 +3527,14 @@ func (c *codexClient) handleEvent(msg map[string]any) {
 			})
 		}
 	case "task_complete":
+		c.cancelElicitations(true)
 		// Extract usage from legacy task_complete if present.
 		c.extractUsageFromMap(msg)
 		if c.onTurnDone != nil {
 			c.onTurnDone(false)
 		}
 	case "turn_aborted":
+		c.cancelElicitations(true)
 		if c.onTurnDone != nil {
 			c.onTurnDone(true)
 		}
@@ -3538,6 +3568,7 @@ func (c *codexClient) handleRawNotification(method string, params map[string]any
 		}
 
 	case "turn/completed":
+		c.cancelElicitations(true)
 		turnID := extractNestedString(params, "turn", "id")
 		status := extractNestedString(params, "turn", "status")
 		threadID, _ := params["threadId"].(string)
@@ -4399,4 +4430,10 @@ func nilIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+func (c *codexClient) writeRPC(data []byte) (int, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.stdin.Write(data)
 }

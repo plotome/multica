@@ -100,3 +100,9 @@ and retain the prior deployment receipt. Until that is implemented, the operator
 must generate the exact existing upgrade command; the owner is not asked to
 select or compare commit ids. Do not represent this runbook as an automatic
 promotion/deployment gate or as already enforced branch protection.
+
+Runtime application approvals and owner-managed late environment names follow
+[the runtime application approval contract](runtime-application-approval.md).
+Promote server, daemon and the Web/Desktop approval UI together; a CLI-only
+upgrade cannot supply human approval UI or database endpoints. Native adapter
+hooks and real consumer acceptance remain separate deployment prerequisites.

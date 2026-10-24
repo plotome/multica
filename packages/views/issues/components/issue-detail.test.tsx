@@ -322,6 +322,8 @@ const mockApiObj = vi.hoisted(() => ({
   listTasksByIssue: vi.fn().mockResolvedValue([]),
   rerunIssue: vi.fn(),
   listTaskMessages: vi.fn().mockResolvedValue([]),
+  listTaskElicitations: vi.fn().mockResolvedValue([]),
+  respondTaskElicitation: vi.fn().mockResolvedValue(undefined),
   listChildIssues: vi.fn().mockResolvedValue({ issues: [] }),
   getChildIssueProgress: vi.fn().mockResolvedValue({ progress: [] }),
   getAgentTaskSnapshot: vi.fn().mockResolvedValue([]),
@@ -344,7 +346,8 @@ const mockApiObj = vi.hoisted(() => ({
   listProjects: vi.fn().mockResolvedValue({ projects: [] }),
 }));
 
-vi.mock("@multica/core/api", () => ({
+vi.mock("@multica/core/api", async (original) => ({
+  ...await original<typeof import("@multica/core/api")>(),
   api: mockApiObj,
   getApi: () => mockApiObj,
   setApiInstance: vi.fn(),
@@ -1384,6 +1387,9 @@ describe("IssueDetail (shared)", () => {
 
     fireEvent.click(within(agentBlock as HTMLElement).getByRole("button", { name: /View activity/ }));
     await within(agentBlock as HTMLElement).findByRole("button", { name: "Open full log" });
+    // The inline activity preview mounts a closed full-log dialog. Approval
+    // polling must stay disabled until that dialog is opened.
+    expect(mockApiObj.listTaskElicitations).not.toHaveBeenCalled();
 
     const reply: TimelineEntry = {
       ...mockTimeline[1]!, id: "run-reply", parent_id: root.id, source_task_id: taskId,

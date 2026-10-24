@@ -312,3 +312,36 @@ trusted_hash = "sha256:y"
 		t.Errorf("config.toml must be left as-is on failure, got %q", data)
 	}
 }
+
+func TestNativeMCPLifecycleHooksSurviveTaskEnvironmentRewrite(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "config.toml")
+	original := `[mcp_servers.lcu]
+command = "/reviewed/lcu"
+args = ["mcp", "--agent", "codex"]
+[hooks]
+Stop = [{ hooks = [{ type = "mcp_tool", server = "lcu", tool = "turn_ended", input = { session_id = "$SESSION_ID", turn_id = "$TURN_ID" } }] }]
+Interrupt = [{ hooks = [{ type = "mcp_tool", server = "lcu", tool = "turn_ended", input = { session_id = "$SESSION_ID", turn_id = "$TURN_ID" } }] }]
+SubagentStop = [{ hooks = [{ type = "mcp_tool", server = "lcu", tool = "turn_ended", input = { session_id = "$SESSION_ID", turn_id = "$TURN_ID" } }] }]
+[hooks.state."/shared/config.toml:stop:0:0"]
+trusted_hash = "reviewed-native-hook-hash"
+`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := sanitizeCopiedCodexConfig(path, "/shared", home); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureCodexShellEnvPolicyConfig(path, []string{"NODE_REPL_TRUSTED_SERVICES"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{`Stop =`, `Interrupt =`, `SubagentStop =`, `type = "mcp_tool"`, `session_id = "$SESSION_ID"`, `turn_id = "$TURN_ID"`, `trusted_hash = "reviewed-native-hook-hash"`, home + `/config.toml:stop:0:0`, `[mcp_servers.lcu]`} {
+		if !strings.Contains(string(got), required) {
+			t.Errorf("native lifecycle configuration lost %q", required)
+		}
+	}
+}

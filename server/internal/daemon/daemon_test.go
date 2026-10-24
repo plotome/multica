@@ -6867,3 +6867,45 @@ func TestHermesProfileChainCoversLaunchPrefix(t *testing.T) {
 		t.Errorf("custom = %v, want only the selector's value removed", strippedCustom)
 	}
 }
+
+func TestRuntimeManifestTaskPolicy(t *testing.T) {
+	manifest := `{"schema":1,"id":"fixture-v1","names":["LATE_RUNTIME_PATH"]}`
+	for _, source := range []string{"owner", "inherited", "explicit"} {
+		t.Run(source, func(t *testing.T) {
+			home := t.TempDir()
+			custom := map[string]string{}
+			explicit := map[string]string{}
+			inherited := []string{}
+			switch source {
+			case "owner":
+				custom["CODEX_RUNTIME_ENV_MANIFEST"] = manifest
+			case "explicit":
+				explicit["CODEX_RUNTIME_ENV_MANIFEST"] = manifest
+			case "inherited":
+				inherited = append(inherited, "CODEX_RUNTIME_ENV_MANIFEST="+manifest)
+			}
+			if err := configureCodexTaskShellEnvironment("codex", home, inherited, explicit, custom, slog.Default()); err != nil {
+				t.Fatal(err)
+			}
+			b, err := os.ReadFile(filepath.Join(home, "config.toml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(b), "LATE_RUNTIME_PATH") != (source == "owner") {
+				t.Fatalf("late name authorization source=%s config=%s", source, b)
+			}
+		})
+	}
+	home := t.TempDir()
+	path := filepath.Join(home, "config.toml")
+	before := []byte("# untouched\n")
+	os.WriteFile(path, before, 0600)
+	err := configureCodexTaskShellEnvironment("codex", home, nil, nil, map[string]string{"CODEX_RUNTIME_ENV_MANIFEST": `{"schema":1,"id":"bad","names":["NODE_OPTIONS"]}`}, slog.Default())
+	if err == nil {
+		t.Fatal("unsafe manifest must fail")
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != string(before) {
+		t.Fatal("invalid manifest modified config")
+	}
+}

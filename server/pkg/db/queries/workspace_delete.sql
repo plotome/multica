@@ -212,6 +212,9 @@ deleted_task_messages AS (
 deleted_task_tokens AS (
     DELETE FROM task_token WHERE task_id IN (SELECT id FROM batch)
 ),
+deleted_task_elicitations AS (
+ DELETE FROM task_elicitation WHERE task_id IN (SELECT id FROM batch)
+),
 deleted_task_supplements AS (
     DELETE FROM task_supplement WHERE task_id IN (SELECT id FROM batch)
 ),
@@ -316,6 +319,9 @@ ws_lark_installations AS MATERIALIZED (
 deleted_task_tokens AS (
     DELETE FROM task_token
     WHERE workspace_id = $1
+),
+deleted_orphan_task_elicitations AS (
+ DELETE FROM task_elicitation WHERE workspace_id= $1
 ),
 deleted_orphan_task_supplements AS (
     DELETE FROM task_supplement WHERE workspace_id = $1
@@ -552,12 +558,12 @@ DELETE FROM comment WHERE comment.workspace_id = $1;
 
 -- name: DeleteWorkspaceIssueRoots :exec
 WITH deleted_wakeup_receipts AS (
- DELETE FROM issue_wakeup_receipt WHERE wakeup_id IN (SELECT id FROM issue_wakeup WHERE workspace_id=$1)
+ DELETE FROM issue_wakeup_receipt WHERE wakeup_id IN (SELECT id FROM issue_wakeup WHERE workspace_id= $1)
 ), deleted_wakeups AS (
- DELETE FROM issue_wakeup WHERE workspace_id=$1
+ DELETE FROM issue_wakeup WHERE workspace_id= $1
 ),
 deleted_child_events AS (
- DELETE FROM issue_child_event WHERE workspace_id=$1
+ DELETE FROM issue_child_event WHERE workspace_id= $1
 ),
 deleted_issues AS (
     DELETE FROM issue WHERE issue.workspace_id = $1

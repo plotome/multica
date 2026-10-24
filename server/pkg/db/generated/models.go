@@ -1528,6 +1528,16 @@ type SysCronExecution struct {
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }
 
+type TaskElicitation struct {
+	ID          pgtype.UUID        `json:"id"`
+	TaskID      pgtype.UUID        `json:"task_id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	Request     []byte             `json:"request"`
+	Response    []byte             `json:"response"`
+	Status      string             `json:"status"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type TaskMessage struct {
 	ID              pgtype.UUID        `json:"id"`
 	TaskID          pgtype.UUID        `json:"task_id"`

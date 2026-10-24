@@ -1059,5 +1059,16 @@
     "selected_one": "{{count}} sélectionné",
     "selected_other": "{{count}} sélectionnés",
     "clear_selection": "Effacer la sélection"
+  },
+  "approval": {
+    "title": "Accès à l’application",
+    "once": "Autoriser une fois",
+    "session": "Autoriser pour cette session",
+    "always": "Toujours autoriser",
+    "decline": "Refuser",
+    "cancel": "Annuler la demande",
+    "details": "Demande originale",
+    "load_error": "Impossible de charger les autorisations. Rouvrez l’exécution pour réessayer.",
+    "response_error": "La réponse n’a pas été enregistrée. Actualisez la demande et réessayez."
   }
 }

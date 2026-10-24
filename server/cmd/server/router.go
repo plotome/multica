@@ -1594,6 +1594,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/runtimes/{runtimeId}/local-skills/import/{requestId}/result", h.ReportLocalSkillImportResult)
 
 		r.Get("/tasks/{taskId}/status", h.GetTaskStatus)
+		r.Post("/tasks/{taskId}/elicitations", h.CreateTaskElicitation)
+		r.Get("/tasks/{taskId}/elicitations/{requestId}", h.GetTaskElicitation)
+		r.Post("/tasks/{taskId}/elicitations/{requestId}/cancel", h.CancelTaskElicitation)
 		r.Post("/tasks/{taskId}/start", h.StartTask)
 		r.Post("/tasks/{taskId}/supplements/claim", h.ClaimTaskSupplement)
 		r.Post("/tasks/{taskId}/supplements/{commentId}/ack", h.AckTaskSupplement)
@@ -2095,6 +2098,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// Task messages (user-facing, not daemon auth)
 			r.Get("/api/tasks/{taskId}/messages", h.ListTaskMessagesByUser)
+			r.With(handler.RequireHumanActor).Get("/api/tasks/{taskId}/elicitations", h.ListTaskElicitations)
+			r.With(handler.RequireHumanActor).Post("/api/tasks/{taskId}/elicitations/{requestId}/respond", h.RespondTaskElicitation)
 			r.With(handler.RequireHumanActor).Post("/api/tasks/{taskId}/retry-source-context", h.RetrySourceContextQuickCreate)
 
 			// Issue quick actions (definitions; running one lives under

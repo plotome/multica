@@ -241,33 +241,23 @@ func TestCodexHandleServerRequestFileChangeApproval(t *testing.T) {
 }
 
 func TestCodexHandleServerRequestMCPElicitation(t *testing.T) {
-	t.Parallel()
-
 	c, fs, _ := newTestCodexClient(t)
-
-	c.handleLine(`{"jsonrpc":"2.0","id":12,"method":"mcpServer/elicitation/request","params":{}}`)
-
+	c.handleLine(`{"jsonrpc":"2.0","id":"approval-12","method":"mcpServer/elicitation/request","params":{}}`)
 	lines := fs.Lines()
 	if len(lines) != 1 {
-		t.Fatalf("expected 1 response, got %d", len(lines))
+		t.Fatal(lines)
 	}
-
-	var resp map[string]any
+	var resp struct {
+		ID     string `json:"id"`
+		Result struct {
+			Action string `json:"action"`
+		} `json:"result"`
+	}
 	if err := json.Unmarshal([]byte(lines[0]), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+		t.Fatal(err)
 	}
-	if resp["id"] != float64(12) {
-		t.Fatalf("expected id=12, got %v", resp["id"])
-	}
-	result := resp["result"].(map[string]any)
-	if result["action"] != "accept" {
-		t.Fatalf("expected action=accept, got %v", result["action"])
-	}
-	if _, ok := result["content"]; !ok {
-		t.Fatal("expected content key in response")
-	}
-	if _, ok := result["_meta"]; !ok {
-		t.Fatal("expected _meta key in response")
+	if resp.ID != "approval-12" || resp.Result.Action != "cancel" {
+		t.Fatalf("must cancel unsupported request without approving: %s", lines[0])
 	}
 }
 

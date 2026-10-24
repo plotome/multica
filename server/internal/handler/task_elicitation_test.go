@@ -78,3 +78,29 @@ func TestAgentCreateRuntimeManifestMachineDenied(t *testing.T) {
 	req.Header.Set("X-Actor-Source", "task_token")
 	testutil.Call(t, testHandler.CreateAgent, req).Want(403)
 }
+
+func TestWorkspaceDeleteRemovesTaskElicitationsAndPreservesNeighbor(t *testing.T) {
+	f := newWorkspaceDeletePathFixture(t, "elicitations")
+	dbfx.Cleanup(t, `DELETE FROM task_elicitation WHERE workspace_id = ANY($1::uuid[])`, []string{f.victimID, f.neighbourID})
+	// Cover each task ownership path, an orphan owned by the workspace, and
+	// an approval belonging entirely to the neighboring workspace.
+	for _, row := range []struct{ task, workspace string }{
+		{f.taskViaAgent, f.neighbourID},
+		{f.taskViaIssue, f.neighbourID},
+		{f.taskViaRuntime, f.neighbourID},
+		{uuid.NewString(), f.victimID},
+		{f.neighbourTask, f.neighbourID},
+	} {
+		dbfx.Exec(t, `INSERT INTO task_elicitation (id, task_id, workspace_id, request, status)
+VALUES (gen_random_uuid(), $1, $2, '{}'::jsonb, 'pending')`, row.task, row.workspace)
+	}
+	req := withURLParam(newRequest(http.MethodDelete, "/api/workspaces/"+f.victimID, nil), "id", f.victimID)
+	testutil.Call(t, testHandler.DeleteWorkspace, req).Want(http.StatusNoContent)
+	if n := dbfx.Count(t, `SELECT count(*) FROM task_elicitation WHERE workspace_id = $1 OR task_id = ANY($2::uuid[])`,
+		f.victimID, []string{f.taskViaAgent, f.taskViaIssue, f.taskViaRuntime}); n != 0 {
+		t.Fatalf("deleted workspace retained %d application approvals", n)
+	}
+	if n := dbfx.Count(t, `SELECT count(*) FROM task_elicitation WHERE task_id = $1`, f.neighbourTask); n != 1 {
+		t.Fatalf("neighbor retained %d approvals, want 1", n)
+	}
+}

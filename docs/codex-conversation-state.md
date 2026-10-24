@@ -94,10 +94,16 @@ There is deliberately no automatic stale-PID recovery based only on age or PID
 reuse. Restoring after a Codex downgrade likewise requires a matching cold
 snapshot; never combine database main files with unrelated WAL files.
 
-The existing Codex-session TTL also prunes inactive new Home generations. GC
-takes the same OS lock and skips quarantined conversations. It leaves small
-thread-binding tombstones and lock files so missing state is distinguishable
-from an un-enrolled legacy session. Task-root GC cannot delete these homes, and
+The existing Codex-session TTL prunes only inactive, **unbound** new Home
+generations. A durable thread binding protects its generation regardless of
+age: inactivity does not prove that the server has retired the conversation.
+GC takes the same OS lock and skips quarantined conversations or unreadable,
+corrupt or linked binding state. Bound generations require explicit operator
+retirement with a verified cold backup; this GC does not reclaim them, including
+older generations retained after a session reset. This trades disk retention
+for resumability until a coordinated retirement policy exists. Missing homes
+still fail closed, and surviving bindings remain available for cold recovery.
+Task-root GC cannot delete these homes, and
 the new homes do not reference the old separately-pruned session stores. Cold
 backups must include the bindings and the complete relevant generation, not
 just `sessions/`. No current external backup policy is modified by this patch.

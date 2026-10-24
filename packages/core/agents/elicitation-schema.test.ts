@@ -7,7 +7,7 @@ describe("approval API compatibility", () => {
   it("defaults unoffered persistence to no persistent choices", () => {
     expect(taskElicitationListSchema.parse([approval])[0]?.request._meta.persist).toEqual([]);
   });
-  it.each([null, {}, [{ ...approval, id: "bad" }], [{ ...approval, request: {} }], [{ ...approval, status: "future" }]])("fails closed on malformed or unknown approvals", (raw) => {
+  it.each([null, {}, [{ ...approval, id: "bad" }], [{ ...approval, request: {} }], [{ ...approval, status: "future" }], [{ ...approval, expires_at: "bad" }]])("fails closed on malformed or unknown approvals", (raw) => {
     expect(parseWithFallback<TaskElicitation[]>(raw, taskElicitationListSchema, [], { endpoint: "test" })).toEqual([]);
   });
 });

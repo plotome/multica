@@ -1090,7 +1090,7 @@ export function AgentTranscriptDialog({
           </div>
         </div>
 
-        <TaskApprovalPanel taskId={task.id} active={open && (isLive || task.status === "running")} />
+        <TaskApprovalPanel taskId={task.id} active={open} />
 
         {/* ── What was asked ─────────────────────────────────────────── */}
         <RunTriggerRow task={task} />

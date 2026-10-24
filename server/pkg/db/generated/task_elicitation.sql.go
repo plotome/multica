@@ -13,7 +13,7 @@ import (
 
 const cancelTaskElicitation = `-- name: CancelTaskElicitation :exec
 UPDATE task_elicitation SET status='cancelled',response=NULL
-WHERE id= $1 AND task_id= $2 AND workspace_id= $3
+WHERE id= $1 AND task_id= $2 AND workspace_id= $3 AND status='pending'
 `
 
 type CancelTaskElicitationParams struct {
@@ -27,20 +27,70 @@ func (q *Queries) CancelTaskElicitation(ctx context.Context, arg CancelTaskElici
 	return err
 }
 
+const consumeTaskElicitation = `-- name: ConsumeTaskElicitation :one
+WITH candidate AS MATERIALIZED (
+ SELECT e.id FROM task_elicitation e
+ JOIN agent_task_queue original ON original.id=e.task_id
+ JOIN agent_task_queue current ON current.id= $1
+ WHERE e.workspace_id= $2 AND current.status='running'
+ AND original.issue_id=current.issue_id AND current.issue_id IS NOT NULL
+ AND original.runtime_id=current.runtime_id
+ AND original.agent_id=current.agent_id
+ AND e.request->'_meta'->'tool_params'->>'app'= $3::text
+ AND e.status='responded' AND e.response->>'action'='accept'
+ AND e.expires_at>now() AND e.consumed_by IS NULL
+ AND (e.response->'_meta'->>'persist' IS NULL OR $4::jsonb ? (e.response->'_meta'->>'persist'))
+ ORDER BY e.created_at DESC LIMIT 1 FOR UPDATE OF e SKIP LOCKED
+)
+UPDATE task_elicitation e SET consumed_by= $1,consumed_at=now()
+FROM candidate WHERE e.id=candidate.id RETURNING e.id, e.task_id, e.workspace_id, e.request, e.response, e.status, e.created_at, e.expires_at, e.consumed_by, e.consumed_at
+`
+
+type ConsumeTaskElicitationParams struct {
+	TaskID        pgtype.UUID `json:"task_id"`
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	App           string      `json:"app"`
+	OfferedScopes []byte      `json:"offered_scopes"`
+}
+
+func (q *Queries) ConsumeTaskElicitation(ctx context.Context, arg ConsumeTaskElicitationParams) (TaskElicitation, error) {
+	row := q.db.QueryRow(ctx, consumeTaskElicitation,
+		arg.TaskID,
+		arg.WorkspaceID,
+		arg.App,
+		arg.OfferedScopes,
+	)
+	var i TaskElicitation
+	err := row.Scan(
+		&i.ID,
+		&i.TaskID,
+		&i.WorkspaceID,
+		&i.Request,
+		&i.Response,
+		&i.Status,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.ConsumedBy,
+		&i.ConsumedAt,
+	)
+	return i, err
+}
+
 const createTaskElicitation = `-- name: CreateTaskElicitation :one
 WITH live AS MATERIALIZED (
  SELECT t.id FROM agent_task_queue t JOIN agent_runtime r ON r.id=t.runtime_id
- WHERE t.id= $4 AND r.workspace_id= $2 AND t.status='running' FOR UPDATE OF t
+ WHERE t.id= $5 AND r.workspace_id= $2 AND t.status='running' FOR UPDATE OF t
 )
-INSERT INTO task_elicitation(id,task_id,workspace_id,request,status)
-SELECT $1,live.id,$2,$3,'pending' FROM live RETURNING id, task_id, workspace_id, request, response, status, created_at
+INSERT INTO task_elicitation(id,task_id,workspace_id,request,status,expires_at)
+SELECT $1,live.id,$2,$3,'pending',$4 FROM live RETURNING id, task_id, workspace_id, request, response, status, created_at, expires_at, consumed_by, consumed_at
 `
 
 type CreateTaskElicitationParams struct {
-	ID          pgtype.UUID `json:"id"`
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	Request     []byte      `json:"request"`
-	TaskID      pgtype.UUID `json:"task_id"`
+	ID          pgtype.UUID        `json:"id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	Request     []byte             `json:"request"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	TaskID      pgtype.UUID        `json:"task_id"`
 }
 
 func (q *Queries) CreateTaskElicitation(ctx context.Context, arg CreateTaskElicitationParams) (TaskElicitation, error) {
@@ -48,6 +98,7 @@ func (q *Queries) CreateTaskElicitation(ctx context.Context, arg CreateTaskElici
 		arg.ID,
 		arg.WorkspaceID,
 		arg.Request,
+		arg.ExpiresAt,
 		arg.TaskID,
 	)
 	var i TaskElicitation
@@ -59,8 +110,20 @@ func (q *Queries) CreateTaskElicitation(ctx context.Context, arg CreateTaskElici
 		&i.Response,
 		&i.Status,
 		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.ConsumedBy,
+		&i.ConsumedAt,
 	)
 	return i, err
+}
+
+const deleteLiveTaskElicitations = `-- name: DeleteLiveTaskElicitations :exec
+DELETE FROM task_elicitation WHERE task_id=ANY($1::uuid[]) AND expires_at IS NULL
+`
+
+func (q *Queries) DeleteLiveTaskElicitations(ctx context.Context, taskIds []pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteLiveTaskElicitations, taskIds)
+	return err
 }
 
 const deleteTaskElicitations = `-- name: DeleteTaskElicitations :exec
@@ -72,9 +135,45 @@ func (q *Queries) DeleteTaskElicitations(ctx context.Context, taskIds []pgtype.U
 	return err
 }
 
+const findUnconsumedTaskElicitation = `-- name: FindUnconsumedTaskElicitation :one
+SELECT e.id, e.task_id, e.workspace_id, e.request, e.response, e.status, e.created_at, e.expires_at, e.consumed_by, e.consumed_at FROM task_elicitation e
+JOIN agent_task_queue original ON original.id=e.task_id
+JOIN agent_task_queue current ON current.id= $1
+WHERE e.workspace_id= $2 AND original.issue_id=current.issue_id
+AND current.issue_id IS NOT NULL AND original.runtime_id=current.runtime_id
+AND original.agent_id=current.agent_id
+AND e.request->'_meta'->'tool_params'->>'app'= $3::text
+AND e.consumed_by IS NULL AND e.expires_at IS NOT NULL
+ORDER BY e.created_at DESC LIMIT 1
+`
+
+type FindUnconsumedTaskElicitationParams struct {
+	TaskID      pgtype.UUID `json:"task_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	App         string      `json:"app"`
+}
+
+func (q *Queries) FindUnconsumedTaskElicitation(ctx context.Context, arg FindUnconsumedTaskElicitationParams) (TaskElicitation, error) {
+	row := q.db.QueryRow(ctx, findUnconsumedTaskElicitation, arg.TaskID, arg.WorkspaceID, arg.App)
+	var i TaskElicitation
+	err := row.Scan(
+		&i.ID,
+		&i.TaskID,
+		&i.WorkspaceID,
+		&i.Request,
+		&i.Response,
+		&i.Status,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.ConsumedBy,
+		&i.ConsumedAt,
+	)
+	return i, err
+}
+
 const getTaskElicitation = `-- name: GetTaskElicitation :one
-SELECT e.id, e.task_id, e.workspace_id, e.request, e.response, e.status, e.created_at FROM task_elicitation e JOIN agent_task_queue t ON t.id=e.task_id
-WHERE e.id= $1 AND e.task_id= $2 AND e.workspace_id= $3 AND t.status='running'
+SELECT e.id, e.task_id, e.workspace_id, e.request, e.response, e.status, e.created_at, e.expires_at, e.consumed_by, e.consumed_at FROM task_elicitation e JOIN agent_task_queue t ON t.id=e.task_id
+WHERE e.id= $1 AND e.task_id= $2 AND e.workspace_id= $3
 `
 
 type GetTaskElicitationParams struct {
@@ -94,13 +193,16 @@ func (q *Queries) GetTaskElicitation(ctx context.Context, arg GetTaskElicitation
 		&i.Response,
 		&i.Status,
 		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.ConsumedBy,
+		&i.ConsumedAt,
 	)
 	return i, err
 }
 
 const listTaskElicitations = `-- name: ListTaskElicitations :many
-SELECT e.id, e.task_id, e.workspace_id, e.request, e.response, e.status, e.created_at FROM task_elicitation e JOIN agent_task_queue t ON t.id=e.task_id
-WHERE e.task_id= $1 AND e.workspace_id= $2 AND e.status='pending' AND t.status='running'
+SELECT e.id, e.task_id, e.workspace_id, e.request, e.response, e.status, e.created_at, e.expires_at, e.consumed_by, e.consumed_at FROM task_elicitation e JOIN agent_task_queue t ON t.id=e.task_id
+WHERE e.task_id= $1 AND e.workspace_id= $2 AND e.status='pending' AND e.expires_at>now()
 ORDER BY e.created_at
 `
 
@@ -126,6 +228,9 @@ func (q *Queries) ListTaskElicitations(ctx context.Context, arg ListTaskElicitat
 			&i.Response,
 			&i.Status,
 			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.ConsumedBy,
+			&i.ConsumedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -140,10 +245,10 @@ func (q *Queries) ListTaskElicitations(ctx context.Context, arg ListTaskElicitat
 const respondTaskElicitation = `-- name: RespondTaskElicitation :one
 WITH live AS MATERIALIZED (
  SELECT t.id FROM agent_task_queue t JOIN agent_runtime r ON r.id=t.runtime_id
- WHERE t.id= $4 AND r.workspace_id= $3 AND r.owner_id= $5 AND t.status='running' FOR UPDATE OF t
+ WHERE t.id= $4 AND r.workspace_id= $3 AND r.owner_id= $5 FOR UPDATE OF t
 )
 UPDATE task_elicitation e SET response= $1,status='responded' FROM live
-WHERE e.id= $2 AND e.task_id=live.id AND e.workspace_id= $3 AND e.status='pending' RETURNING e.id, e.task_id, e.workspace_id, e.request, e.response, e.status, e.created_at
+WHERE e.id= $2 AND e.task_id=live.id AND e.workspace_id= $3 AND e.status='pending' AND e.expires_at>now() RETURNING e.id, e.task_id, e.workspace_id, e.request, e.response, e.status, e.created_at, e.expires_at, e.consumed_by, e.consumed_at
 `
 
 type RespondTaskElicitationParams struct {
@@ -171,6 +276,9 @@ func (q *Queries) RespondTaskElicitation(ctx context.Context, arg RespondTaskEli
 		&i.Response,
 		&i.Status,
 		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.ConsumedBy,
+		&i.ConsumedAt,
 	)
 	return i, err
 }

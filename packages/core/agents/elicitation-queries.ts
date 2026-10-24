@@ -5,7 +5,7 @@ import type { ElicitationChoice } from "./elicitation-schema";
 export const taskElicitationKey = (wsId: string, taskId: string) =>
   ["workspaces", wsId, "task-elicitations", taskId] as const;
 
-// Match the daemon's task-input polling cadence. No polling for closed runs.
+// Deferred requests remain actionable after a run finishes.
 const taskInputPollInterval = 5000;
 export function useTaskElicitations(wsId: string, taskId: string, active: boolean) {
   const queryClient = useQueryClient();

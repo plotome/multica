@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/multica-ai/multica/server/pkg/protocol"
+	"time"
 )
 
 type codexElicitation struct {
@@ -45,16 +47,18 @@ func (c *codexClient) handleElicitation(id, params json.RawMessage) {
 	c.elicitationWG.Add(1)
 	c.elicitationMu.Unlock()
 	if c.onMessage != nil {
-		c.onMessage(Message{Type: MessageLog, Level: "info", Content: "Waiting for the device owner to review an application approval in the task transcript."})
+		c.onMessage(Message{Type: MessageLog, Level: "info", Content: "Checking for an owner-approved application grant."})
 	}
 	go func() {
 		defer c.elicitationWG.Done()
 		defer cancel()
 		response, err := c.onElicitation(ctx, params)
+		var approval *protocol.ApplicationApprovalRequired
+		deferredApproval := errors.As(err, &approval)
 		c.elicitationMu.Lock()
 		_, pending := c.elicitations[key]
 		if pending {
-			if err != nil && ctx.Err() == nil && c.onMessage != nil {
+			if err != nil && !deferredApproval && ctx.Err() == nil && c.onMessage != nil {
 				c.onMessage(Message{Type: MessageError, Content: "Application approval could not be delivered or read. The request was cancelled; check the server and device connection before retrying."})
 			}
 			if err != nil || ctx.Err() != nil {
@@ -69,6 +73,21 @@ func (c *codexClient) handleElicitation(id, params json.RawMessage) {
 			delete(c.elicitations, key)
 		}
 		c.elicitationMu.Unlock()
+		if pending && deferredApproval && ctx.Err() == nil {
+			instruction := approval.Error() + "\nComputer Use was cancelled. Do not retry, loop, or switch apps to bypass this decision. If approval_required, use the existing owner decision card and wait ledger, then end this turn. If denied or expired, report that the operation cannot proceed."
+			if c.onMessage != nil {
+				c.onMessage(Message{Type: MessageError, Content: approval.Error()})
+			}
+			steerCtx, steerCancel := context.WithTimeout(ctx, 8*time.Second)
+			_, steerErr := c.request(steerCtx, "turn/steer", map[string]any{
+				"threadId": p.ThreadID, "expectedTurnId": p.TurnID,
+				"input": []map[string]any{{"type": "text", "text": instruction}},
+			})
+			steerCancel()
+			if steerErr != nil && c.onMessage != nil {
+				c.onMessage(Message{Type: MessageError, Content: "Failed to deliver application approval result to active turn: " + steerErr.Error()})
+			}
+		}
 		if c.onSemanticActivity != nil {
 			c.onSemanticActivity("elicitation:resolved")
 		}

@@ -2099,6 +2099,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// Task messages (user-facing, not daemon auth)
 			r.Get("/api/tasks/{taskId}/messages", h.ListTaskMessagesByUser)
 			r.With(handler.RequireHumanActor).Get("/api/tasks/{taskId}/elicitations", h.ListTaskElicitations)
+			r.With(handler.RequireHumanActor).Get("/api/tasks/{taskId}/elicitations/{requestId}", h.GetTaskElicitationForOwner)
 			r.With(handler.RequireHumanActor).Post("/api/tasks/{taskId}/elicitations/{requestId}/respond", h.RespondTaskElicitation)
 			r.With(handler.RequireHumanActor).Post("/api/tasks/{taskId}/retry-source-context", h.RetrySourceContextQuickCreate)
 

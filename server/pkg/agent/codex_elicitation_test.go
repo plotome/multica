@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 	"strings"
 	"testing"
 )
@@ -68,6 +69,44 @@ func TestCodexElicitationHumanResponseAndCancellation(t *testing.T) {
 				t.Fatal(lines)
 			}
 		})
+	}
+}
+
+func TestCodexElicitationCancelsThenDeliversStructuredResultToExactTurn(t *testing.T) {
+	c, _, _ := newTestCodexClient(t)
+	c.threadID = "thread"
+	c.setActiveTurnID("turn")
+	c.notificationProtocol = "raw"
+	stdin := &fakeStdinWithHook{}
+	stdin.afterWrite = func() { c.handleLine(`{"jsonrpc":"2.0","id":1,"result":{}}`) }
+	c.stdin = stdin
+	c.onElicitation = func(context.Context, json.RawMessage) (json.RawMessage, error) {
+		return nil, &protocol.ApplicationApprovalRequired{Code: "computer_use_approval_required", RequestID: "approval", App: "fixture.app"}
+	}
+	c.handleElicitation(json.RawMessage(`"request"`), json.RawMessage(testApprovalRequest))
+	c.elicitationWG.Wait()
+	lines := stdin.Lines()
+	if len(lines) != 2 || !strings.Contains(lines[0], `"action":"cancel"`) {
+		t.Fatalf("not immediately cancelled: %v", lines)
+	}
+	var steer struct {
+		Method string `json:"method"`
+		Params struct {
+			ThreadID string `json:"threadId"`
+			TurnID   string `json:"expectedTurnId"`
+			Input    []struct {
+				Text string `json:"text"`
+			} `json:"input"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &steer); err != nil {
+		t.Fatal(err)
+	}
+	if steer.Method != "turn/steer" || steer.Params.ThreadID != "thread" || steer.Params.TurnID != "turn" || !strings.Contains(steer.Params.Input[0].Text, `"request_id":"approval"`) {
+		t.Fatalf("lost structured result: %+v", steer)
+	}
+	if c.hasPendingElicitation() {
+		t.Fatal("human wait survived")
 	}
 }
 func TestCodexElicitationRejectsStaleTurnAndForgedResponse(t *testing.T) {

@@ -342,9 +342,52 @@ func (l *CodexConversationHomeLease) Quarantine() {
 	l.lock = nil
 }
 
+// codexBoundGenerations must be called under the conversation lock. Unknown or
+// damaged binding state prevents GC rather than making a durable home disposable.
+func codexBoundGenerations(root string) (map[string]bool, error) {
+	dir := filepath.Join(root, "bindings")
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("invalid Codex bindings directory: %s", dir)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	bound := make(map[string]bool)
+	for _, entry := range entries {
+		name := entry.Name()
+		if filepath.Ext(name) != ".json" || !validCodexStateDigest(name[:len(name)-len(".json")]) {
+			return nil, fmt.Errorf("invalid Codex binding filename: %s", name)
+		}
+		fi, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		if !fi.Mode().IsRegular() {
+			return nil, fmt.Errorf("invalid Codex session binding: %s", name)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			return nil, err
+		}
+		var binding struct {
+			Generation string `json:"generation"`
+		}
+		if err := json.Unmarshal(data, &binding); err != nil || !validCodexStateDigest(binding.Generation) {
+			return nil, fmt.Errorf("invalid Codex session binding: %s", name)
+		}
+		bound[binding.Generation] = true
+	}
+	return bound, nil
+}
+
 // PruneCodexConversationHomes shares the execution lock, never follows links,
-// and never deletes the lock inode. Small bindings remain as tombstones so GC
-// loss cannot masquerade as a pre-upgrade session eligible for legacy fallback.
+// and never deletes the lock inode. TTL applies only to unbound generations:
+// elapsed time does not prove the server has retired a resumable conversation.
 func PruneCodexConversationHomes(profile string, retention time.Duration, now time.Time, logger *slog.Logger) (removed int, bytesFreed int64) {
 	if retention <= 0 {
 		return
@@ -378,6 +421,11 @@ func PruneCodexConversationHomes(profile string, retention time.Duration, now ti
 			if _, err := os.Lstat(filepath.Join(root, "active.json")); !os.IsNotExist(err) {
 				return
 			}
+			bound, err := codexBoundGenerations(root)
+			if err != nil {
+				logger.Warn("skip Codex home GC with unreadable bindings", "root", root, "error", err)
+				return
+			}
 			gens := filepath.Join(root, "generations")
 			fi, err := os.Lstat(gens)
 			if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
@@ -389,6 +437,9 @@ func PruneCodexConversationHomes(profile string, retention time.Duration, now ti
 			}
 			for _, home := range homes {
 				if !home.IsDir() || !validCodexStateDigest(home.Name()) {
+					continue
+				}
+				if bound[home.Name()] {
 					continue
 				}
 				path := filepath.Join(gens, home.Name())

@@ -1032,5 +1032,16 @@
   "actions": {
     "selected_other": "{{count}} 件選択中",
     "clear_selection": "選択を解除"
+  },
+  "approval": {
+    "title": "アプリへのアクセス",
+    "once": "今回のみ許可",
+    "session": "このセッションで許可",
+    "always": "常に許可",
+    "decline": "拒否",
+    "cancel": "リクエストを取消",
+    "details": "元のリクエスト",
+    "load_error": "アプリの承認を読み込めません。実行を開き直してください。",
+    "response_error": "応答を保存できませんでした。リクエストを更新して再試行してください。"
   }
 }

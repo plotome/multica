@@ -490,6 +490,9 @@ cleared_wakeups AS (
 cleared_child_events AS (
  DELETE FROM issue_child_event WHERE parent_id IN (SELECT target.id FROM target) OR child_id IN (SELECT target.id FROM target)
 ),
+cleared_task_elicitations AS (
+ DELETE FROM task_elicitation WHERE task_id IN (SELECT id FROM agent_task_queue WHERE issue_id IN (SELECT target.id FROM target))
+),
 cleared_task_supplements AS (
  DELETE FROM task_supplement WHERE issue_id IN (SELECT target.id FROM target)
 ),

@@ -1032,5 +1032,16 @@
   "actions": {
     "selected_other": "{{count}}개 선택됨",
     "clear_selection": "선택 해제"
+  },
+  "approval": {
+    "title": "앱 접근 승인",
+    "once": "한 번만 허용",
+    "session": "이 세션에서 허용",
+    "always": "항상 허용",
+    "decline": "거부",
+    "cancel": "요청 취소",
+    "details": "원본 요청",
+    "load_error": "앱 승인을 불러오지 못했습니다. 실행 기록을 다시 열어 주세요.",
+    "response_error": "응답을 저장하지 못했습니다. 요청을 새로 고친 후 다시 시도하세요."
   }
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, forwardRef } from "react";
+import { TaskApprovalPanel } from "./task-approval-panel";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useTraceIssueLabels } from "./use-trace-issue-labels";
 import { Virtuoso, type VirtuosoHandle, type Components } from "react-virtuoso";
@@ -1088,6 +1089,8 @@ export function AgentTranscriptDialog({
             </div>
           </div>
         </div>
+
+        <TaskApprovalPanel taskId={task.id} active={open && (isLive || task.status === "running")} />
 
         {/* ── What was asked ─────────────────────────────────────────── */}
         <RunTriggerRow task={task} />

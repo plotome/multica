@@ -1407,6 +1407,10 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if _, present := req.CustomEnv["CODEX_RUNTIME_ENV_MANIFEST"]; present && isMachineCredentialActor(r) {
+		writeError(w, http.StatusForbidden, "runtime environment manifests require a human owner")
+		return
+	}
 
 	if req.Name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")

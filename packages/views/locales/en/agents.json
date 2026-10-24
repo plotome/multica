@@ -1059,5 +1059,16 @@
     "selected_one": "{{count}} selected",
     "selected_other": "{{count}} selected",
     "clear_selection": "Clear selection"
+  },
+  "approval": {
+    "title": "Application access",
+    "once": "Allow once",
+    "session": "Allow for this session",
+    "always": "Always allow",
+    "decline": "Decline",
+    "cancel": "Cancel request",
+    "details": "Original request",
+    "load_error": "Could not load application approvals. Reopen the run to retry.",
+    "response_error": "The response could not be saved. Refresh the request and try again."
   }
 }

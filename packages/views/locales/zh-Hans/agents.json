@@ -1032,5 +1032,16 @@
   "actions": {
     "selected_other": "已选 {{count}} 项",
     "clear_selection": "清除选择"
+  },
+  "approval": {
+    "title": "应用访问授权",
+    "once": "仅允许一次",
+    "session": "本会话允许",
+    "always": "始终允许",
+    "decline": "拒绝",
+    "cancel": "取消请求",
+    "details": "原始请求",
+    "load_error": "无法加载应用授权。请重新打开运行记录重试。",
+    "response_error": "授权选择未保存。请刷新请求后重试。"
   }
 }

@@ -3,66 +3,46 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 	"net/http"
-	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
-func TestTaskElicitationForwardAndCancel(t *testing.T) {
-	for _, mode := range []string{"respond", "cancel", "old-server"} {
+func TestTaskElicitationNeverPollsOrCancelsDeferredRecord(t *testing.T) {
+	for _, mode := range []string{"pending", "grant", "old-server"} {
 		t.Run(mode, func(t *testing.T) {
-			var created, cancelled, polled atomic.Int32
-			ready := make(chan struct{}, 1)
+			var calls atomic.Int32
 			d := taskSupplementTestDaemon(t, func(w http.ResponseWriter, r *http.Request) {
-				if strings.HasSuffix(r.URL.Path, "/cancel") {
-					cancelled.Add(1)
-					w.Write([]byte(`{}`))
-					return
+				calls.Add(1)
+				if r.Method != "POST" {
+					t.Error("unexpected polling")
 				}
-				if r.Method == "POST" {
-					created.Add(1)
-					if mode == "old-server" {
-						w.WriteHeader(404)
-						return
-					}
-					w.WriteHeader(201)
-					w.Write([]byte(`{}`))
-					return
-				}
-				polled.Add(1)
-				select {
-				case ready <- struct{}{}:
+				switch mode {
+				case "pending":
+					w.Write([]byte(`{"approval":{"code":"computer_use_approval_required","request_id":"approval","app":"fixture.app"}}`))
+				case "grant":
+					w.Write([]byte(`{"response":{"action":"accept","content":{}}}`))
 				default:
-				}
-				if mode == "respond" {
-					w.Write([]byte(`{"status":"responded","response":{"action":"decline"}}`))
-				} else {
-					w.Write([]byte(`{"status":"pending"}`))
+					w.WriteHeader(404)
 				}
 			})
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			if mode == "cancel" {
-				go func() {
-					select {
-					case <-ready:
-						cancel()
-					case <-ctx.Done():
-					}
-				}()
+			response, err := d.requestTaskElicitation(context.Background(), "task", json.RawMessage(`{}`), d.logger)
+			if calls.Load() != 1 {
+				t.Fatalf("calls=%d", calls.Load())
 			}
-			response, err := d.requestTaskElicitation(ctx, "fixture-task", json.RawMessage(`{"message":"original"}`), d.logger)
-			if created.Load() != 1 || cancelled.Load() != 1 {
-				t.Fatalf("create=%d cleanup=%d", created.Load(), cancelled.Load())
-			}
-			if mode == "respond" {
-				if err != nil || string(response) != `{"action":"decline"}` {
-					t.Fatal(string(response), err)
+			if mode == "grant" {
+				if err != nil || len(response) == 0 {
+					t.Fatal(err, string(response))
+				}
+			} else if mode == "pending" {
+				var required *protocol.ApplicationApprovalRequired
+				if !errors.As(err, &required) || required.RequestID != "approval" {
+					t.Fatal(err)
 				}
 			} else if err == nil {
-				t.Fatal("must expose failure")
+				t.Fatal("old server must fail closed")
 			}
 		})
 	}

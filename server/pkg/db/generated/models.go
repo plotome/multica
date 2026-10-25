@@ -1536,6 +1536,9 @@ type TaskElicitation struct {
 	Response    []byte             `json:"response"`
 	Status      string             `json:"status"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ConsumedBy  pgtype.UUID        `json:"consumed_by"`
+	ConsumedAt  pgtype.Timestamptz `json:"consumed_at"`
 }
 
 type TaskMessage struct {

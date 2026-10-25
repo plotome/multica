@@ -1,19 +1,26 @@
 package handler
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"github.com/google/uuid"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 )
 
 const handlerApproval = `{"threadId":"thread","turnId":"turn","serverName":"cua_repl","mode":"form","message":"Allow Fixture?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","connector_id":"computer-use","tool_params":{"app":"fixture.app"},"persist":["session"]}}`
 
 func newApprovalFixture(t *testing.T) (supplementFixture, string) {
 	t.Helper()
+	t.Setenv("COMPUTER_USE_APPROVAL_TTL", "1h")
 	f := newSupplementFixture(t, "codex", "running", false)
 	id := uuid.NewString()
 	dbfx.Cleanup(t, `DELETE FROM task_elicitation WHERE task_id=$1`, f.taskID)
@@ -46,30 +53,54 @@ func TestTaskElicitationOwnerOnlyReplayAndScope(t *testing.T) {
 	testutil.Call(t, testHandler.GetTaskElicitation, withURLParams(newOwnerDaemonRequest("GET", "/", nil), "taskId", other.taskID, "requestId", id)).Want(410)
 	testutil.Call(t, testHandler.GetTaskElicitation, withURLParams(newDaemonTokenRequest("GET", "/", nil, testWorkspaceID, "different-device"), "taskId", f.taskID, "requestId", id)).Want(404)
 }
-func TestTaskElicitationCancellationAndTerminal(t *testing.T) {
-	for _, end := range []string{"cancel", "complete"} {
-		t.Run(end, func(t *testing.T) {
+func TestTaskElicitationSurvivesTerminalAndConsumesOnce(t *testing.T) {
+	f, id := newApprovalFixture(t)
+	if w := completeTaskViaHandler(t, f.taskID, "done"); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	testutil.Call(t, testHandler.RespondTaskElicitation, approvalHumanRequest(f.taskID, id, "once")).Want(200)
+	retry := dbfx.Task(t, f.agentID, testutil.Cols{"status": "running", "issue_id": f.issueID, "runtime_id": f.runtimeID})
+	dbfx.Cleanup(t, `DELETE FROM task_elicitation WHERE task_id=$1`, retry)
+	create := func() taskElicitationResponse {
+		t.Helper()
+		var response taskElicitationResponse
+		req := withURLParam(newOwnerDaemonRequest("POST", "/", map[string]any{"id": uuid.NewString(), "request": json.RawMessage(handlerApproval)}), "taskId", retry)
+		w := testutil.Call(t, testHandler.CreateTaskElicitation, req)
+		w.JSON(&response)
+		return response
+	}
+	first := create()
+	assertJSONEqual(t, first.Response, `{"action":"accept","content":{}}`)
+	second := create()
+	if second.Approval == nil || second.Approval.Code != "computer_use_approval_required" {
+		t.Fatalf("reused once: %+v", second)
+	}
+}
+
+func TestTaskElicitationExpiryAndDenialNeverGrant(t *testing.T) {
+	for _, mode := range []string{"expired", "declined", "cancelled"} {
+		t.Run(mode, func(t *testing.T) {
 			f, id := newApprovalFixture(t)
-			if end == "cancel" {
-				testutil.Call(t, testHandler.CancelTaskElicitation, withURLParams(newOwnerDaemonRequest("POST", "/", nil), "taskId", f.taskID, "requestId", id)).Want(200)
+			if mode == "expired" {
+				dbfx.Exec(t, `UPDATE task_elicitation SET expires_at=now()-interval '1 second' WHERE id=$1`, id)
 			} else {
-				w := completeTaskViaHandler(t, f.taskID, "done")
-				if w.Code != 200 {
-					t.Fatalf("complete: %d %s", w.Code, w.Body.String())
+				choice := "decline"
+				if mode == "cancelled" {
+					choice = "cancel"
 				}
-				if n := dbfx.Count(t, `SELECT count(*) FROM task_elicitation WHERE task_id=$1`, f.taskID); n != 0 {
-					t.Fatal("terminal task retained approvals")
-				}
+				testutil.Call(t, testHandler.RespondTaskElicitation, approvalHumanRequest(f.taskID, id, choice)).Want(200)
+			}
+			var result taskElicitationResponse
+			req := withURLParam(newOwnerDaemonRequest("POST", "/", map[string]any{"id": uuid.NewString(), "request": json.RawMessage(handlerApproval)}), "taskId", f.taskID)
+			testutil.Call(t, testHandler.CreateTaskElicitation, req).Want(201).JSON(&result)
+			if result.Approval == nil || result.Approval.Code == "computer_use_approval_required" || len(result.Response) > 0 {
+				t.Fatalf("unexpected grant %+v", result)
 			}
 			testutil.Call(t, testHandler.RespondTaskElicitation, approvalHumanRequest(f.taskID, id, "once")).Want(409)
-			var approvals []taskElicitationResponse
-			testutil.Call(t, testHandler.ListTaskElicitations, approvalHumanRequest(f.taskID, id, "")).Want(200).JSON(&approvals)
-			if len(approvals) != 0 {
-				t.Fatal("stale approval visible")
-			}
 		})
 	}
 }
+
 func TestAgentCreateRuntimeManifestMachineDenied(t *testing.T) {
 	if testHandler == nil {
 		t.Fatal("isolated database is required")
@@ -102,5 +133,53 @@ VALUES (gen_random_uuid(), $1, $2, '{}'::jsonb, 'pending')`, row.task, row.works
 	}
 	if n := dbfx.Count(t, `SELECT count(*) FROM task_elicitation WHERE task_id = $1`, f.neighbourTask); n != 1 {
 		t.Fatalf("neighbor retained %d approvals, want 1", n)
+	}
+}
+
+func TestTaskElicitationCardServiceRequiresOwnerReceiptAndRejectsTaskToken(t *testing.T) {
+	f, id := newApprovalFixture(t)
+	serviceID := uuid.NewString()
+	t.Setenv("COMPUTER_USE_CARD_SERVICE_USER_ID", serviceID)
+	t.Setenv("COMPUTER_USE_CARD_SECRET", "fixture-secret")
+	receipt := protocol.CardApprovalReceipt{DecisionID: "P-1", OwnerID: testUserID, IssueID: f.issueID, TaskID: f.taskID, RequestID: id, Choice: "once", ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}
+	mac := hmac.New(sha256.New, []byte("fixture-secret"))
+	mac.Write([]byte(strings.Join([]string{receipt.DecisionID, receipt.OwnerID, receipt.IssueID, receipt.TaskID, receipt.RequestID, receipt.Choice, receipt.ExpiresAt}, "\n")))
+	receipt.Signature = hex.EncodeToString(mac.Sum(nil))
+	request := func(r *protocol.CardApprovalReceipt) *http.Request {
+		req := withURLParams(newRequest("POST", "/", map[string]any{"choice": "once", "card_receipt": r}), "taskId", f.taskID, "requestId", id)
+		req.Header.Set("X-User-ID", serviceID)
+		return req.WithContext(middleware.SetMemberContext(req.Context(), testWorkspaceID, db.Member{}))
+	}
+	testutil.Call(t, testHandler.RespondTaskElicitation, request(nil)).Want(403)
+	forged := receipt
+	forged.RequestID = uuid.NewString()
+	testutil.Call(t, testHandler.RespondTaskElicitation, request(&forged)).Want(403)
+	machine := request(&receipt)
+	machine.Header.Set("X-Actor-Source", "task_token")
+	testutil.Call(t, testHandler.RespondTaskElicitation, machine).Want(403)
+	testutil.Call(t, testHandler.RespondTaskElicitation, request(&receipt)).Want(200)
+	testutil.Call(t, testHandler.RespondTaskElicitation, request(&receipt)).Want(409)
+}
+
+func TestTaskElicitationConcurrentConsumptionIsSingleUse(t *testing.T) {
+	f, id := newApprovalFixture(t)
+	testutil.Call(t, testHandler.RespondTaskElicitation, approvalHumanRequest(f.taskID, id, "once")).Want(200)
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := testHandler.Queries.ConsumeTaskElicitation(t.Context(), db.ConsumeTaskElicitationParams{TaskID: parseUUID(f.taskID), WorkspaceID: parseUUID(testWorkspaceID), App: "fixture.app", OfferedScopes: []byte(`[]`)})
+			results <- err
+		}()
+	}
+	granted := 0
+	for range 2 {
+		if err := <-results; err == nil {
+			granted++
+		} else if !isNotFound(err) {
+			t.Fatal(err)
+		}
+	}
+	if granted != 1 {
+		t.Fatalf("grants=%d", granted)
 	}
 }

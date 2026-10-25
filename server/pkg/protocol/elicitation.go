@@ -48,7 +48,7 @@ func ParseMCPElicitation(raw json.RawMessage) (MCPElicitation, error) {
 }
 
 // ElicitationResponse maps only an explicit human choice. Persistence remains
-// owned by the original MCP runtime; Multica does not cache application grants.
+// owned by the original MCP runtime; a deferred grant delivers this choice once.
 func ElicitationResponse(raw json.RawMessage, choice string) (json.RawMessage, error) {
 	p, err := ParseMCPElicitation(raw)
 	if err != nil {

@@ -20,7 +20,7 @@ describe("application approval panel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Decline" }));
     await waitFor(() => expect(api.respondTaskElicitation).toHaveBeenCalledWith("task", "017fa8d2-51b5-4337-a440-1d024349c105", "decline"));
   });
-  it("does not fetch approvals for a closed run", () => { vi.mocked(api.listTaskElicitations).mockClear(); renderPanel(false); expect(api.listTaskElicitations).not.toHaveBeenCalled(); });
+  it("does not fetch while the transcript is closed", () => { vi.mocked(api.listTaskElicitations).mockClear(); renderPanel(false); expect(api.listTaskElicitations).not.toHaveBeenCalled(); });
   it("leaves a failed response visible with retry feedback", async () => {
     vi.mocked(api.respondTaskElicitation).mockRejectedValue(new Error("offline")); renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: "Allow once" }));

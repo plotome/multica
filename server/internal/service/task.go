@@ -6338,7 +6338,7 @@ func SettleTerminalTaskState(ctx context.Context, q *db.Queries, tasks ...db.Age
 	for _, task := range tasks {
 		taskIDs = append(taskIDs, task.ID)
 	}
-	if err := q.DeleteTaskElicitations(ctx, taskIDs); err != nil {
+	if err := q.DeleteLiveTaskElicitations(ctx, taskIDs); err != nil {
 		return fmt.Errorf("settle task elicitations: %w", err)
 	}
 	if _, err := q.SettleTerminalTaskSupplements(ctx, taskIDs); err != nil {

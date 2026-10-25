@@ -12,11 +12,15 @@
       "introduced_by": "58130e2f98c9b5175e0523c46a0c78584a5665e0",
       "required_files": ["server/internal/daemon/task_elicitation.go", "server/pkg/agent/codex_elicitation.go", "docs/runtime-application-approval.md"],
       "required_tests": [
-        "TestTaskElicitationForwardAndCancel",
+        "TestTaskElicitationNeverPollsOrCancelsDeferredRecord",
         "TestCodexElicitationHumanResponseAndCancellation",
         "TestCodexElicitationRejectsStaleTurnAndForgedResponse",
         "TestTaskElicitationOwnerOnlyReplayAndScope",
-        "TestTaskElicitationCancellationAndTerminal"
+        "TestTaskElicitationSurvivesTerminalAndConsumesOnce",
+        "TestTaskElicitationExpiryAndDenialNeverGrant",
+        "TestTaskElicitationConcurrentConsumptionIsSingleUse",
+        "TestTaskElicitationCardServiceRequiresOwnerReceiptAndRejectsTaskToken",
+        "TestCodexElicitationCancelsThenDeliversStructuredResultToExactTurn"
       ]
     },
     {

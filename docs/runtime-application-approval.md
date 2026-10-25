@@ -4,30 +4,56 @@ The Codex backend forwards native computer-use application elicitation to the
 human who owns the run's device. This adds no authority to the agent or its task
 token. It does not change command execution, file, or sandbox approval policy.
 
-The run transcript in Web and Desktop shows the original message, app, server,
-warning, full request, and supported choices. Nothing opens automatically or
-steals focus. The operator opens the run transcript. Closing it keeps the
-request pending; Cancel request cancels that request, while stopping the run
-cancels all outstanding requests and sends `turn/interrupt` on the original
-app-server connection. Native Stop/Interrupt hooks remain responsible for the
-runtime's own cleanup. Never call `turn_ended` from a new MCP connection as a
-substitute.
+Native application requests no longer wait for a human on a live connection.
+The daemon makes one bounded server request. A matching, unexpired owner grant
+is atomically consumed; otherwise it replies `cancel`, never a saved `decline`.
+The original request, warning and offered scopes remain in the task approval
+record after the task finishes. The run transcript in Web and Desktop can still
+answer that pending record.
+
+The agent receives a JSON `computer_use_approval_required` notice through the
+Codex active-turn steering channel, containing issue/task/request IDs, app,
+original request and expiry. This is separate from the MCP cancellation reply:
+MCP elicitation only accepts its protocol-defined response shapes. The agent
+uses the existing owner decision card and wait ledger, then ends its turn. It
+must not poll, retry the tool or substitute another app. Expired and denied
+records produce `computer_use_approval_expired` / `computer_use_approval_denied`.
+Already approved native apps never reach this path.
 
 Only native empty-object forms marked `mcp_tool_call` / `computer-use` are
-supported. Other elicitation shapes fail closed with a visible explanation.
-The platform does not emulate generic form or URL elicitation, or claim Claude
-SDK support from the presence of MCP alone. Session/always persistence is
-returned to the original runtime only when it offered that scope. Multica
-stores no application permission cache.
+supported. Other elicitation shapes still fail closed; this does not intercept
+upstream command, sandbox or JavaScript review. Session/always persistence is
+returned only when the current native request offers that scope. `once` has no
+persist metadata; session and always each consume one pending grant and let the
+runtime enforce its chosen persistence. Grants cannot cross issue, runtime,
+agent, app or workspace. A lost response consumes the grant without a retry.
 
-Every request uses a fresh ID bound to one task and exact provider thread/turn.
-Daemon endpoints verify runtime ownership and binding. Human endpoints reject
-machine credentials and require the device owner, workspace match, live task,
-and unresolved request. Responding twice or after cancellation fails. Task row
-locks serialize responses against terminal transitions. Terminal settlement and
-issue/workspace deletion erase request data. Network uncertainty cancels; it
-never retries a grant. Waiting for a human pauses silence watchdogs, but the
-configured overall task timeout still applies.
+`COMPUTER_USE_APPROVAL_TTL` is a required positive Go duration, with no implicit
+default. It bounds both the card deadline and the pending grant, starting when
+the request is recorded. Missing configuration fails closed. Migration 596
+adds expiry/consumption fields and invalidates old live pending requests; legacy
+records cannot turn into deferred grants. Issue/workspace deletion removes the
+records; task termination only removes legacy live-connection records.
+
+Human endpoints keep the machine-credential rejection (`task_token` and
+`cloud_pat`) and device-owner check. The existing decision-card service may
+relay an authenticated owner answer using a signed receipt bound to decision,
+owner, issue, task, request, choice and deadline. Configure its exact member ID
+in `COMPUTER_USE_CARD_SERVICE_USER_ID` and the card service's existing signing
+secret in `COMPUTER_USE_CARD_SECRET`; unset values disable this relay. The
+service must verify its owner callback before signing, and commit/verify the
+grant before the existing card reply/wakeup proceeds. This is a trusted service
+bridge, not a claim of isolation from another process running as the same OS
+user. Do not pass either secret to agent runtime manifests.
+
+`multica application-approval get TASK REQUEST` lets that configured service
+reconcile owner answers made in Multica. `respond ... --choice CHOICE
+--card-receipt-file FILE` relays a receipt through the same CLI authentication.
+No task token can write a grant. The card service uses its existing work queue
+to mirror native answers, post the existing card reply, and wake the declared
+wait exactly once. Refusal and timeout wake only to report the operation cannot
+proceed. The configuration and service deployment must accompany this backend
+and daemon change; fixtures do not prove Air desktop acceptance.
 
 ## Approval-surface isolation
 
@@ -71,7 +97,7 @@ writing configuration. Existing inherited-secret filtering is unchanged.
 ## Deployment and rollback
 
 Build the server, CLI/daemon, shared Web and Desktop from the same reviewed
-commit. Apply additive migrations 593–595 before starting the new server. No
+commit. Apply additive migrations 593–596 before starting the new server. No
 existing hot table changes shape. Existing installed clients remain compatible
 but cannot show approval choices: use the matching Web UI or upgrade Desktop.
 A new daemon against an old server cancels approval rather than granting it.
@@ -86,7 +112,7 @@ input. Fixture tests are not desktop acceptance.
 For rollback, stop accepting new pilot runs, cancel/finish existing runs, remove
 the owner-managed manifest, then restore the previous daemon/server/UI versions.
 Keep the additive tables during application rollback; they are not read by old
-versions. A later schema rollback may remove 595, 594, then 593 after confirming
+versions. A later schema rollback may remove 596, 595, 594, then 593 after confirming
 no new server remains. Do not restart the daemon that hosts the upgrade task.
 Local candidate packages are unsigned/ad-hoc and not public releases; remote
 push, PR, production promotion and runtime activation require the separate

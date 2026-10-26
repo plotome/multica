@@ -182,13 +182,13 @@ export function SquadDetailPage({ squadId }: { squadId: string }) {
     return wsMembers.find((m) => m.user_id === id)?.name ?? id.slice(0, 8);
   };
 
-  if (!validSquadId || squadError) {
+  if (!validSquadId || squadError || (!squadPending && !squad)) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
         <AlertCircle className="size-8 text-destructive" aria-hidden="true" />
         <p className="text-body font-medium">{t(($) => $.detail.load_failed)}</p>
         {validSquadId && (
-          <Button variant="outline" onClick={() => void refetchSquad()}>
+          <Button type="button" variant="outline" onClick={() => void refetchSquad()}>
             {t(($) => $.detail.try_again)}
           </Button>
         )}

@@ -2,6 +2,18 @@
   "schema_version": 1,
   "patches": [
     {
+      "id": "squad-detail-route-id",
+      "introduced_by": "b0842de511a4d63c256187fe11e9167ad8d05070",
+      "required_files": ["packages/views/squads/components/squad-detail-page.tsx", "apps/desktop/src/renderer/src/pages/squad-detail-page.test.tsx"],
+      "required_tests": []
+    },
+    {
+      "id": "bounded-api-requests",
+      "introduced_by": "b0842de511a4d63c256187fe11e9167ad8d05070",
+      "required_files": ["packages/core/api/client.ts", "packages/core/api/client.test.ts"],
+      "required_tests": []
+    },
+    {
       "id": "owner-runtime-environment-manifest",
       "introduced_by": "58130e2f98c9b5175e0523c46a0c78584a5665e0",
       "required_files": ["server/internal/daemon/execenv/runtime_manifest.go"],

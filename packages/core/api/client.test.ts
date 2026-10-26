@@ -10,6 +10,24 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("ApiClient request deadline", () => {
+  it("aborts a stalled API request and lets callers handle the failure", async () => {
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient("https://api.example.test", { requestTimeoutMs: 10 });
+    await expect(client.getSquad("4f15ace0-c1c2-4117-a3a5-5160b992702d"))
+      .rejects.toMatchObject({ name: "TimeoutError" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an invalid deadline instead of silently leaving requests unbounded", () => {
+    expect(() => new ApiClient("https://api.example.test", { requestTimeoutMs: 0 })).toThrow("requestTimeoutMs");
+  });
+});
+
 describe("ApiClient status reorder", () => {
   it("opts into built-in ordering and tolerates malformed responses", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ statuses: "invalid" }), {
@@ -1173,7 +1191,9 @@ describe("ApiClient", () => {
     const request = new URL(fetchMock.mock.calls[1]![0]);
     expect(request.searchParams.get("limit")).toBe("7");
     expect(request.searchParams.get("before")).toBe(cursor);
-    expect(fetchMock.mock.calls[1]![1].signal).toBe(controller.signal);
+    const requestSignal = fetchMock.mock.calls[1]![1].signal as AbortSignal;
+    controller.abort();
+    expect(requestSignal.aborted).toBe(true);
   });
 
   it("drops the continuation when the task page is malformed", async () => {

@@ -15,6 +15,10 @@
     "row_menu": "스쿼드 작업",
     "archive_action": "보관"
   },
+  "detail": {
+    "load_failed": "이 팀을 불러올 수 없습니다",
+    "try_again": "다시 시도"
+  },
   "inspector": {
     "details_section": "세부 정보",
     "archive_button": "보관"

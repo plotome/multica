@@ -15,6 +15,10 @@
     "row_menu": "Actions du squad",
     "archive_action": "Archiver"
   },
+  "detail": {
+    "load_failed": "Impossible de charger cette équipe",
+    "try_again": "Réessayer"
+  },
   "inspector": {
     "details_section": "Détails",
     "archive_button": "Archiver"

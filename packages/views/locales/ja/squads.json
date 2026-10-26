@@ -15,6 +15,10 @@
     "row_menu": "スカッドの操作",
     "archive_action": "アーカイブ"
   },
+  "detail": {
+    "load_failed": "このチームを読み込めませんでした",
+    "try_again": "再試行"
+  },
   "inspector": {
     "details_section": "詳細",
     "archive_button": "アーカイブ"

@@ -512,6 +512,8 @@ export interface ApiClientIdentity {
 export interface ApiClientOptions {
   logger?: Logger;
   onUnauthorized?: () => void;
+  /** Per-request deadline; defaults to the CLI's 30-second HTTP timeout. */
+  requestTimeoutMs?: number;
   /** Identifies the client to the server. Sent as X-Client-* headers. */
   identity?: ApiClientIdentity;
   /**
@@ -780,6 +782,9 @@ export class ApiClient {
   private options: ApiClientOptions;
 
   constructor(baseUrl: string, options?: ApiClientOptions) {
+    if (options?.requestTimeoutMs !== undefined && (!Number.isFinite(options.requestTimeoutMs) || options.requestTimeoutMs <= 0)) {
+      throw new Error("requestTimeoutMs must be positive and finite");
+    }
     this.baseUrl = baseUrl;
     this.options = options ?? {};
     this.logger = options?.logger ?? noopLogger;
@@ -933,9 +938,12 @@ export class ApiClient {
 
     this.logger.info(`→ ${method} ${path}`, { rid });
 
+    const timeoutSignal = AbortSignal.timeout(this.options.requestTimeoutMs ?? 30_000);
+    const signal = init?.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal;
     const send = () =>
       fetch(`${this.baseUrl}${path}`, {
         ...init,
+        signal,
         headers: buildHeaders(),
         credentials: "include",
       });

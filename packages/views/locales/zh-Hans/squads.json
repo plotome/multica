@@ -15,6 +15,10 @@
     "row_menu": "小队操作",
     "archive_action": "归档"
   },
+  "detail": {
+    "load_failed": "无法加载这个小队",
+    "try_again": "重试"
+  },
   "inspector": {
     "details_section": "详情",
     "archive_button": "归档"

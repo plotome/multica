@@ -15,7 +15,7 @@ import { useNavigation } from "../../navigation";
 import { AppLink } from "../../navigation";
 import { BreadcrumbHeader } from "../../layout/breadcrumb-header";
 import { PageHeader } from "../../layout/page-header";
-import { Users, Plus, Trash2, ArrowUpRight, Crown, Loader2, Pencil, FileText, Save } from "lucide-react";
+import { Users, Plus, Trash2, ArrowUpRight, Crown, Loader2, Pencil, FileText, Save, AlertCircle } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Input } from "@multica/ui/components/ui/input";
 import { Label } from "@multica/ui/components/ui/label";
@@ -63,25 +63,25 @@ import type { Squad, SquadMember, SquadMemberStatus, SquadMemberStatusValue, Age
 import { useT } from "../../i18n";
 import { matchesPinyin } from "../../editor/extensions/pinyin-match";
 
-export function SquadDetailPage() {
+export function SquadDetailPage({ squadId }: { squadId: string }) {
   const { t } = useT("squads");
   const workspace = useCurrentWorkspace();
   const wsId = useWorkspaceId();
   const p = useWorkspacePaths();
-  const { pathname, push } = useNavigation();
+  const { push } = useNavigation();
   const queryClient = useQueryClient();
-  const squadId = pathname.split("/").pop() ?? "";
+  const validSquadId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(squadId);
 
-  const { data: squad, refetch: refetchSquad } = useQuery<Squad>({
+  const { data: squad, error: squadError, isPending: squadPending, refetch: refetchSquad } = useQuery<Squad>({
     queryKey: [...workspaceKeys.squads(wsId), squadId],
     queryFn: () => api.getSquad(squadId),
-    enabled: !!workspace?.id && !!squadId,
+    enabled: !!workspace?.id && validSquadId,
   });
 
   const { data: members = [], refetch: refetchMembers } = useQuery<SquadMember[]>({
     queryKey: [...workspaceKeys.squads(wsId), squadId, "members"],
     queryFn: () => api.listSquadMembers(squadId),
-    enabled: !!workspace?.id && !!squadId,
+    enabled: !!workspace?.id && validSquadId,
   });
 
   // Per-squad working/idle/offline + active-issue snapshot. WS task / agent /
@@ -90,7 +90,7 @@ export function SquadDetailPage() {
   // its row in O(1).
   const { data: memberStatusResp } = useQuery({
     ...squadMemberStatusOptions(wsId, squadId),
-    enabled: !!workspace?.id && !!squadId,
+    enabled: !!workspace?.id && validSquadId,
   });
   const memberStatusById = useMemo(() => {
     const map = new Map<string, SquadMemberStatus>();
@@ -182,7 +182,20 @@ export function SquadDetailPage() {
     return wsMembers.find((m) => m.user_id === id)?.name ?? id.slice(0, 8);
   };
 
-  if (!squad) {
+  if (!validSquadId || squadError) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+        <AlertCircle className="size-8 text-destructive" aria-hidden="true" />
+        <p className="text-body font-medium">{t(($) => $.detail.load_failed)}</p>
+        {validSquadId && (
+          <Button variant="outline" onClick={() => void refetchSquad()}>
+            {t(($) => $.detail.try_again)}
+          </Button>
+        )}
+      </div>
+    );
+  }
+  if (squadPending || !squad) {
     return <SquadDetailSkeleton />;
   }
 

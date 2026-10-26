@@ -3,6 +3,11 @@ import { describe, expect, it } from "vitest";
 import { taskElicitationListSchema, type TaskElicitation } from "./elicitation-schema";
 import { parseWithFallback } from "../api/schema";
 const approval = { id: "017fa8d2-51b5-4337-a440-1d024349c105", status: "pending", request: { threadId: "thread", turnId: "turn", serverName: "cua_repl", message: "Allow?", _meta: { tool_params: { app: "fixture" } } } };
+
+it("accepts a browser-origin approval without an app target", () => {
+  const origin = { ...approval, request: { ...approval.request, _meta: { connector_id: "browser-use", tool_name: "access_browser_origin", origin: "https://multica.ploto.cc" } } };
+  expect(taskElicitationListSchema.parse([origin])[0]?.request._meta.origin).toBe("https://multica.ploto.cc");
+});
 describe("approval API compatibility", () => {
   it("defaults unoffered persistence to no persistent choices", () => {
     expect(taskElicitationListSchema.parse([approval])[0]?.request._meta.persist).toEqual([]);

@@ -21,6 +21,13 @@ describe("application approval panel", () => {
     await waitFor(() => expect(api.respondTaskElicitation).toHaveBeenCalledWith("task", "017fa8d2-51b5-4337-a440-1d024349c105", "decline"));
   });
   it("does not fetch while the transcript is closed", () => { vi.mocked(api.listTaskElicitations).mockClear(); renderPanel(false); expect(api.listTaskElicitations).not.toHaveBeenCalled(); });
+  it("shows an exact browser origin and offers a one-time grant", async () => {
+    vi.mocked(api.listTaskElicitations).mockResolvedValue([{ id: "017fa8d2-51b5-4337-a440-1d024349c105", status: "pending", request: { ...request, _meta: { origin: "https://multica.ploto.cc", persist: [] } } }]);
+    renderPanel();
+    expect(await screen.findByText("cua_repl · https://multica.ploto.cc")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Allow for this session" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Always allow" })).toBeNull();
+  });
   it("leaves a failed response visible with retry feedback", async () => {
     vi.mocked(api.respondTaskElicitation).mockRejectedValue(new Error("offline")); renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: "Allow once" }));

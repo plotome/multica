@@ -36,7 +36,9 @@ WITH candidate AS MATERIALIZED (
  AND original.issue_id=current.issue_id AND current.issue_id IS NOT NULL
  AND original.runtime_id=current.runtime_id
  AND original.agent_id=current.agent_id
- AND e.request->'_meta'->'tool_params'->>'app'= @app::text
+ AND (CASE WHEN e.request->'_meta'->>'connector_id'='browser-use'
+      THEN 'origin:' || (e.request->'_meta'->>'origin')
+      ELSE 'app:' || (e.request->'_meta'->'tool_params'->>'app') END)= @app::text
  AND e.status='responded' AND e.response->>'action'='accept'
  AND e.expires_at>now() AND e.consumed_by IS NULL
  AND (e.response->'_meta'->>'persist' IS NULL OR @offered_scopes::jsonb ? (e.response->'_meta'->>'persist'))
@@ -52,7 +54,9 @@ JOIN agent_task_queue current ON current.id= @task_id
 WHERE e.workspace_id= @workspace_id AND original.issue_id=current.issue_id
 AND current.issue_id IS NOT NULL AND original.runtime_id=current.runtime_id
 AND original.agent_id=current.agent_id
-AND e.request->'_meta'->'tool_params'->>'app'= @app::text
+AND (CASE WHEN e.request->'_meta'->>'connector_id'='browser-use'
+     THEN 'origin:' || (e.request->'_meta'->>'origin')
+     ELSE 'app:' || (e.request->'_meta'->'tool_params'->>'app') END)= @app::text
 AND e.consumed_by IS NULL AND e.expires_at IS NOT NULL
 ORDER BY e.created_at DESC LIMIT 1;
 

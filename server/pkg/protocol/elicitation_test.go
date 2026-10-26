@@ -7,6 +7,44 @@ import (
 )
 
 const nativeApproval = `{"threadId":"t","turnId":"u","serverName":"cua_repl","mode":"form","message":"Allow Fixture?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","connector_id":"computer-use","tool_params":{"app":"fixture"},"persist":["session","always"]}}`
+const originApproval = `{"threadId":"t","turnId":"u","serverName":"cua_repl","mode":"form","message":"Allow site?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","connector_id":"browser-use","tool_name":"access_browser_origin","origin":"https://multica.ploto.cc"}}`
+
+func TestBrowserOriginApprovalIsExactAndOnceOnly(t *testing.T) {
+	p, err := ParseMCPElicitation(json.RawMessage(originApproval))
+	if err != nil || p.SubjectKey() != "origin:https://multica.ploto.cc" || p.Resource() != "https://multica.ploto.cc" {
+		t.Fatalf("origin request: %+v, %v", p, err)
+	}
+	for _, choice := range []string{"once", "decline", "cancel"} {
+		if _, err := ElicitationResponse(json.RawMessage(originApproval), choice); err != nil {
+			t.Fatalf("%s: %v", choice, err)
+		}
+	}
+	for _, choice := range []string{"session", "always"} {
+		if _, err := ElicitationResponse(json.RawMessage(originApproval), choice); err == nil {
+			t.Fatalf("persistent origin grant accepted: %s", choice)
+		}
+	}
+	for _, bad := range []string{
+		`https://multica.ploto.cc/path`, `https://multica.ploto.cc?x=1`,
+		`https://user@multica.ploto.cc`, `https://multica.ploto.cc:443`, `https://MULTICA.ploto.cc`,
+		`file:///tmp/x`, `javascript:alert(1)`,
+	} {
+		raw := strings.Replace(originApproval, `https://multica.ploto.cc`, bad, 1)
+		if _, err := ParseMCPElicitation(json.RawMessage(raw)); err == nil {
+			t.Fatalf("bad origin accepted: %s", bad)
+		}
+	}
+	for _, bad := range []string{
+		strings.Replace(originApproval, `"connector_id":"browser-use"`, `"connector_id":"computer-use"`, 1),
+		strings.Replace(originApproval, `"tool_name":"access_browser_origin"`, `"tool_name":"open_tab"`, 1),
+		strings.Replace(originApproval, `"origin":"https://multica.ploto.cc"`, `"origin":"https://multica.ploto.cc","persist":["always"]`, 1),
+		strings.Replace(originApproval, `"origin":"https://multica.ploto.cc"`, `"origin":"https://multica.ploto.cc","tool_params":{"app":"fixture"}`, 1),
+	} {
+		if _, err := ParseMCPElicitation(json.RawMessage(bad)); err == nil {
+			t.Fatal("unsupported request accepted:", bad)
+		}
+	}
+}
 
 func TestElicitationChoices(t *testing.T) {
 	for _, choice := range []string{"once", "session", "always", "decline", "cancel"} {

@@ -17,6 +17,44 @@ import (
 )
 
 const handlerApproval = `{"threadId":"thread","turnId":"turn","serverName":"cua_repl","mode":"form","message":"Allow Fixture?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","connector_id":"computer-use","tool_params":{"app":"fixture.app"},"persist":["session"]}}`
+const handlerOriginApproval = `{"threadId":"thread","turnId":"turn","serverName":"cua_repl","mode":"form","message":"Allow site?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","connector_id":"browser-use","tool_name":"access_browser_origin","origin":"https://multica.ploto.cc"}}`
+
+func TestBrowserOriginGrantRequiresOwnerAndExactSubject(t *testing.T) {
+	t.Setenv("COMPUTER_USE_APPROVAL_TTL", "1h")
+	f := newSupplementFixture(t, "codex", "running", false)
+	dbfx.Cleanup(t, `DELETE FROM task_elicitation WHERE task_id=$1`, f.taskID)
+	create := func(raw string) taskElicitationResponse {
+		t.Helper()
+		var result taskElicitationResponse
+		req := withURLParam(newOwnerDaemonRequest("POST", "/", map[string]any{"id": uuid.NewString(), "request": json.RawMessage(raw)}), "taskId", f.taskID)
+		testutil.Call(t, testHandler.CreateTaskElicitation, req).Want(201).JSON(&result)
+		return result
+	}
+	first := create(handlerOriginApproval)
+	if first.Approval == nil || first.Approval.App != "https://multica.ploto.cc" {
+		t.Fatalf("origin was not forwarded: %+v", first)
+	}
+	wrongActor := approvalHumanRequest(f.taskID, first.ID, "once")
+	wrongActor.Header.Set("X-User-ID", uuid.NewString())
+	testutil.Call(t, testHandler.RespondTaskElicitation, wrongActor).Want(403)
+	testutil.Call(t, testHandler.RespondTaskElicitation, approvalHumanRequest(f.taskID, first.ID, "always")).Want(400)
+	testutil.Call(t, testHandler.RespondTaskElicitation, approvalHumanRequest(f.taskID, first.ID, "once")).Want(200)
+	for _, raw := range []string{
+		strings.Replace(handlerOriginApproval, `https://multica.ploto.cc`, `https://other.ploto.cc`, 1),
+		strings.Replace(handlerOriginApproval, `"connector_id":"browser-use","tool_name":"access_browser_origin","origin":"https://multica.ploto.cc"`, `"connector_id":"computer-use","tool_params":{"app":"https://multica.ploto.cc"}`, 1),
+	} {
+		result := create(raw)
+		if result.Approval == nil || len(result.Response) != 0 {
+			t.Fatalf("cross-subject grant: %+v", result)
+		}
+	}
+	result := create(handlerOriginApproval)
+	assertJSONEqual(t, result.Response, `{"action":"accept","content":{}}`)
+	result = create(handlerOriginApproval)
+	if result.Approval == nil || len(result.Response) != 0 {
+		t.Fatalf("reused one-shot grant: %+v", result)
+	}
+}
 
 func newApprovalFixture(t *testing.T) (supplementFixture, string) {
 	t.Helper()

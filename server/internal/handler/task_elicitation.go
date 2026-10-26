@@ -62,7 +62,7 @@ func (h *Handler) CreateTaskElicitation(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	scopes, _ := json.Marshal(p.Meta.Persist)
-	grant, err := h.Queries.ConsumeTaskElicitation(r.Context(), db.ConsumeTaskElicitationParams{TaskID: task.ID, WorkspaceID: parseUUID(ws), App: p.Meta.ToolParams.App, OfferedScopes: scopes})
+	grant, err := h.Queries.ConsumeTaskElicitation(r.Context(), db.ConsumeTaskElicitationParams{TaskID: task.ID, WorkspaceID: parseUUID(ws), App: p.SubjectKey(), OfferedScopes: scopes})
 	if err == nil {
 		writeJSON(w, 200, elicitationResponse(grant))
 		return
@@ -71,7 +71,7 @@ func (h *Handler) CreateTaskElicitation(w http.ResponseWriter, r *http.Request) 
 		writeError(w, 500, "failed to consume application approval")
 		return
 	}
-	e, err := h.Queries.FindUnconsumedTaskElicitation(r.Context(), db.FindUnconsumedTaskElicitationParams{TaskID: task.ID, WorkspaceID: parseUUID(ws), App: p.Meta.ToolParams.App})
+	e, err := h.Queries.FindUnconsumedTaskElicitation(r.Context(), db.FindUnconsumedTaskElicitationParams{TaskID: task.ID, WorkspaceID: parseUUID(ws), App: p.SubjectKey()})
 	if err != nil && !isNotFound(err) {
 		writeError(w, 500, "failed to load application approval")
 		return
@@ -94,7 +94,7 @@ func (h *Handler) CreateTaskElicitation(w http.ResponseWriter, r *http.Request) 
 	} else if e.Status != "pending" {
 		code = "computer_use_approval_denied"
 	}
-	result.Approval = &protocol.ApplicationApprovalRequired{Code: code, RequestID: uuidToString(e.ID), TaskID: uuidToString(e.TaskID), IssueID: uuidToString(task.IssueID), App: p.Meta.ToolParams.App, Request: e.Request, ExpiresAt: e.ExpiresAt.Time.Format(time.RFC3339Nano)}
+	result.Approval = &protocol.ApplicationApprovalRequired{Code: code, RequestID: uuidToString(e.ID), TaskID: uuidToString(e.TaskID), IssueID: uuidToString(task.IssueID), App: p.Resource(), Request: e.Request, ExpiresAt: e.ExpiresAt.Time.Format(time.RFC3339Nano)}
 	// A previously answered request with incompatible scopes is never forwarded.
 	result.Response = nil
 	writeJSON(w, http.StatusCreated, result)

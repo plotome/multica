@@ -1035,5 +1035,16 @@
   "actions": {
     "selected_other": "已選 {{count}} 項",
     "clear_selection": "清除選擇"
+  },
+  "approval": {
+    "title": "應用程式存取授權",
+    "once": "僅允許一次",
+    "session": "本次會話允許",
+    "always": "始終允許",
+    "decline": "拒絕",
+    "cancel": "取消請求",
+    "details": "原始請求",
+    "load_error": "無法載入應用程式授權。請重新開啟執行記錄後重試。",
+    "response_error": "授權選擇未儲存。請重新整理請求後重試。"
   }
 }

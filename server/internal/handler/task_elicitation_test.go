@@ -23,14 +23,14 @@ func TestBrowserOriginGrantRequiresOwnerAndExactSubject(t *testing.T) {
 	t.Setenv("COMPUTER_USE_APPROVAL_TTL", "1h")
 	f := newSupplementFixture(t, "codex", "running", false)
 	dbfx.Cleanup(t, `DELETE FROM task_elicitation WHERE task_id=$1`, f.taskID)
-	create := func(raw string) taskElicitationResponse {
+	create := func(raw string, want int) taskElicitationResponse {
 		t.Helper()
 		var result taskElicitationResponse
 		req := withURLParam(newOwnerDaemonRequest("POST", "/", map[string]any{"id": uuid.NewString(), "request": json.RawMessage(raw)}), "taskId", f.taskID)
-		testutil.Call(t, testHandler.CreateTaskElicitation, req).Want(201).JSON(&result)
+		testutil.Call(t, testHandler.CreateTaskElicitation, req).Want(want).JSON(&result)
 		return result
 	}
-	first := create(handlerOriginApproval)
+	first := create(handlerOriginApproval, 201)
 	if first.Approval == nil || first.Approval.App != "https://multica.ploto.cc" {
 		t.Fatalf("origin was not forwarded: %+v", first)
 	}
@@ -43,14 +43,14 @@ func TestBrowserOriginGrantRequiresOwnerAndExactSubject(t *testing.T) {
 		strings.Replace(handlerOriginApproval, `https://multica.ploto.cc`, `https://other.ploto.cc`, 1),
 		strings.Replace(handlerOriginApproval, `"connector_id":"browser-use","tool_name":"access_browser_origin","origin":"https://multica.ploto.cc"`, `"connector_id":"computer-use","tool_params":{"app":"https://multica.ploto.cc"}`, 1),
 	} {
-		result := create(raw)
+		result := create(raw, 201)
 		if result.Approval == nil || len(result.Response) != 0 {
 			t.Fatalf("cross-subject grant: %+v", result)
 		}
 	}
-	result := create(handlerOriginApproval)
+	result := create(handlerOriginApproval, 200)
 	assertJSONEqual(t, result.Response, `{"action":"accept","content":{}}`)
-	result = create(handlerOriginApproval)
+	result = create(handlerOriginApproval, 201)
 	if result.Approval == nil || len(result.Response) != 0 {
 		t.Fatalf("reused one-shot grant: %+v", result)
 	}
@@ -205,7 +205,7 @@ func TestTaskElicitationConcurrentConsumptionIsSingleUse(t *testing.T) {
 	results := make(chan error, 2)
 	for range 2 {
 		go func() {
-			_, err := testHandler.Queries.ConsumeTaskElicitation(t.Context(), db.ConsumeTaskElicitationParams{TaskID: parseUUID(f.taskID), WorkspaceID: parseUUID(testWorkspaceID), App: "fixture.app", OfferedScopes: []byte(`[]`)})
+			_, err := testHandler.Queries.ConsumeTaskElicitation(t.Context(), db.ConsumeTaskElicitationParams{TaskID: parseUUID(f.taskID), WorkspaceID: parseUUID(testWorkspaceID), App: "app:fixture.app", OfferedScopes: []byte(`[]`)})
 			results <- err
 		}()
 	}

@@ -3,11 +3,12 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
 // MCPElicitation preserves the runtime's original request for human review.
-// Only native empty-form application approval is currently supported.
+// Native application and exact browser-origin approvals use the same owner review.
 type MCPElicitation struct {
 	ThreadID        string          `json:"threadId"`
 	TurnID          string          `json:"turnId"`
@@ -18,6 +19,8 @@ type MCPElicitation struct {
 	Meta            struct {
 		Kind       string `json:"codex_approval_kind"`
 		Connector  string `json:"connector_id"`
+		ToolName   string `json:"tool_name"`
+		Origin     string `json:"origin"`
 		ToolParams struct {
 			App string `json:"app"`
 		} `json:"tool_params"`
@@ -30,11 +33,23 @@ func ParseMCPElicitation(raw json.RawMessage) (MCPElicitation, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return p, err
 	}
-	if p.ThreadID == "" || p.TurnID == "" || p.ServerName == "" || p.Message == "" || p.Mode != "form" || p.Meta.Kind != "mcp_tool_call" || p.Meta.Connector != "computer-use" || strings.TrimSpace(p.Meta.ToolParams.App) == "" {
-		return p, fmt.Errorf("unsupported MCP elicitation; native computer-use application approval is required")
+	if p.ThreadID == "" || p.TurnID == "" || p.ServerName == "" || p.Message == "" || p.Mode != "form" || p.Meta.Kind != "mcp_tool_call" {
+		return p, fmt.Errorf("unsupported MCP elicitation")
 	}
-	if isApplicationApprovalSurface(p.Meta.ToolParams.App) {
-		return p, fmt.Errorf("computer use cannot control an application that can display agent approvals: %s", p.Meta.ToolParams.App)
+	switch p.Meta.Connector {
+	case "computer-use":
+		if strings.TrimSpace(p.Meta.ToolParams.App) == "" || p.Meta.Origin != "" || p.Meta.ToolName != "" {
+			return p, fmt.Errorf("unsupported native application approval")
+		}
+		if isApplicationApprovalSurface(p.Meta.ToolParams.App) {
+			return p, fmt.Errorf("computer use cannot control an application that can display agent approvals: %s", p.Meta.ToolParams.App)
+		}
+	case "browser-use":
+		if p.Meta.ToolName != "access_browser_origin" || p.Meta.ToolParams.App != "" || !validBrowserOrigin(p.Meta.Origin) || len(p.Meta.Persist) != 0 {
+			return p, fmt.Errorf("unsupported browser-origin approval")
+		}
+	default:
+		return p, fmt.Errorf("unsupported MCP approval connector")
 	}
 	var schema struct {
 		Type       string                     `json:"type"`
@@ -45,6 +60,30 @@ func ParseMCPElicitation(raw json.RawMessage) (MCPElicitation, error) {
 		return p, fmt.Errorf("unsupported MCP approval schema")
 	}
 	return p, nil
+}
+
+func validBrowserOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Hostname() != "" &&
+		u.User == nil && u.Opaque == "" && u.Path == "" && u.RawPath == "" && u.RawQuery == "" &&
+		!u.ForceQuery && u.Fragment == "" && u.Host != "" && !strings.HasSuffix(u.Host, ":") &&
+		u.String() == origin && strings.ToLower(u.Host) == u.Host &&
+		!(u.Scheme == "http" && u.Port() == "80") && !(u.Scheme == "https" && u.Port() == "443")
+}
+
+// SubjectKey keeps application IDs and Web origins in distinct grant namespaces.
+func (p MCPElicitation) SubjectKey() string {
+	if p.Meta.Connector == "browser-use" {
+		return "origin:" + p.Meta.Origin
+	}
+	return "app:" + p.Meta.ToolParams.App
+}
+
+func (p MCPElicitation) Resource() string {
+	if p.Meta.Connector == "browser-use" {
+		return p.Meta.Origin
+	}
+	return p.Meta.ToolParams.App
 }
 
 // ElicitationResponse maps only an explicit human choice. Persistence remains
@@ -60,6 +99,9 @@ func ElicitationResponse(raw json.RawMessage, choice string) (json.RawMessage, e
 	case "once":
 		return json.Marshal(map[string]any{"action": "accept", "content": map[string]any{}})
 	case "session", "always":
+		if p.Meta.Connector == "browser-use" {
+			break
+		}
 		for _, scope := range p.Meta.Persist {
 			if scope == choice {
 				return json.Marshal(map[string]any{"action": "accept", "content": map[string]any{}, "_meta": map[string]any{"persist": choice}})

@@ -35,7 +35,7 @@ export function TaskApprovalPanel({ taskId, active }: { taskId: string; active: 
         return (
           <div key={id} className="mt-3 space-y-2">
             <p className="whitespace-pre-wrap break-words text-body">{request.message}</p>
-            <p className="break-all text-caption text-muted-foreground">{request.serverName} · {request._meta.tool_params.app}</p>
+            <p className="break-all text-caption text-muted-foreground">{request.serverName} · {request._meta.origin ?? request._meta.tool_params?.app}</p>
             {warning && <p className="whitespace-pre-wrap text-caption">{warning}</p>}
             <div className="flex flex-wrap gap-2">
               {choices.map((choice) => <Button key={choice} size="sm" variant={choice === "once" ? "default" : "outline"} disabled={respond.isPending} aria-busy={respond.isPending} onClick={() => respond.mutate({ id, choice })}>{labels[choice]}</Button>)}

@@ -10,7 +10,8 @@ export const taskElicitationSchema = z.object({
     serverName: z.string().min(1),
     message: z.string().min(1),
     _meta: z.object({
-      tool_params: z.object({ app: z.string().min(1) }),
+      tool_params: z.object({ app: z.string().min(1) }).optional(),
+      origin: z.string().url().optional(),
       persist: z.array(z.string()).default([]),
       warningSubtitle: z.string().optional(),
       subtitle: z.string().optional(),

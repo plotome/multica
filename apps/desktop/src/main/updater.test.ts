@@ -22,6 +22,7 @@ const ctx = vi.hoisted(() => ({
   appHandlers: new Map<string, Handler[]>(),
   appQuit: vi.fn(),
   userDataPath: "",
+  isPackaged: false,
 }));
 
 vi.mock("electron-updater", () => {
@@ -45,6 +46,7 @@ vi.mock("electron-updater", () => {
 
 vi.mock("electron", () => ({
   app: {
+    get isPackaged() { return ctx.isPackaged; },
     getVersion: ctx.getVersion,
     getPath: vi.fn(() => ctx.userDataPath),
     on: vi.fn((event: string, handler: Handler) => {
@@ -166,6 +168,7 @@ function makeWindowWithThrowingSend(error: Error) {
 
 describe("setupAutoUpdater", () => {
   beforeEach(() => {
+    ctx.isPackaged = false;
     vi.useFakeTimers();
     ctx.userDataPath = mkdtempSync(join(tmpdir(), "multica-updater-test-"));
     ctx.handlers.clear();
@@ -186,7 +189,27 @@ describe("setupAutoUpdater", () => {
     rmSync(ctx.userDataPath, { recursive: true, force: true });
   });
 
+  it("keeps packaged Fork builds offline and rejects every installation entry point", async () => {
+    ctx.isPackaged = true;
+    setupAutoUpdater(() => null);
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000);
+    expect(autoUpdater.autoDownload).toBe(false);
+    expect(autoUpdater.autoInstallOnAppQuit).toBe(false);
+    expect(await invokeIpc("updater:get-preferences")).toEqual({ automaticUpdates: false, mode: "manual" });
+    expect(await invokeIpc("updater:check")).toMatchObject({ ok: false });
+    for (const channel of ["updater:download", "updater:install"]) {
+      expect(() => ctx.ipcHandlers.get(channel)!()).toThrow("manual updates");
+    }
+    expect(() => ctx.ipcHandlers.get("updater:set-automatic-updates")!(null, true)).toThrow("manual updates");
+    expect(ctx.checkForUpdates).not.toHaveBeenCalled();
+    expect(ctx.downloadUpdate).not.toHaveBeenCalled();
+    expect(ctx.quitAndInstall).not.toHaveBeenCalled();
+    expect(ctx.handlers.size).toBe(0);
+  });
+
   it("enables automatic background updates by default", async () => {
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
     setupAutoUpdater(() => null);
 
     await expect(invokeIpc("updater:get-preferences")).resolves.toEqual({

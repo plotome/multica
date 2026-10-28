@@ -1,5 +1,6 @@
 export interface UpdaterPreferences {
   automaticUpdates: boolean;
+  mode?: "manual";
 }
 
 export type ManualUpdateCheckResult =

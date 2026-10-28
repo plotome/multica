@@ -15,8 +15,8 @@ import type { DaemonInstallPrep } from "./update-install-gate";
 // Silent background updates: electron-updater downloads on its own as soon
 // as `update-available` fires; we only surface UI when the package is fully
 // downloaded and ready to install on next quit.
-autoUpdater.autoDownload = true;
-autoUpdater.autoInstallOnAppQuit = true;
+autoUpdater.autoDownload = !app.isPackaged;
+autoUpdater.autoInstallOnAppQuit = !app.isPackaged;
 
 // Windows arm64 ships its own update metadata channel because
 // electron-builder's `latest.yml` is not arch-suffixed on Windows — both
@@ -152,6 +152,24 @@ export function setupAutoUpdater(
   getMainWindow: () => BrowserWindow | null,
   options: SetupAutoUpdaterOptions = {},
 ): void {
+  // Packaged Fork builds are maintained with verified offline bundles. Never
+  // consume an upstream feed or a cached pending installer, even on app quit.
+  if (app.isPackaged) {
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
+    const preferences: UpdaterPreferences = { automaticUpdates: false, mode: "manual" };
+    const message = "This Fork uses manual updates. Prepare a verified Desktop package and switch it during a maintenance window.";
+    ipcMain.handle("updater:get-preferences", () => preferences);
+    ipcMain.handle("updater:set-automatic-updates", (_event, enabled: unknown) => {
+      if (enabled !== false) throw new Error(message);
+      return preferences;
+    });
+    ipcMain.handle("updater:check", (): ManualUpdateCheckResult => ({ ok: false, error: message }));
+    for (const channel of ["updater:download", "updater:install"]) {
+      ipcMain.handle(channel, () => { throw new Error(message); });
+    }
+    return;
+  }
   const platform = options.platform ?? process.platform;
   // Only Windows locks a running executable against replacement; macOS and
   // Linux keep their existing update path untouched.

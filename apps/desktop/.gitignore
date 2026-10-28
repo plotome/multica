@@ -6,3 +6,4 @@ out
 *.log*
 # CLI binary bundled at build time (from server/bin/)
 resources/bin/
+resources/desktop-release.json

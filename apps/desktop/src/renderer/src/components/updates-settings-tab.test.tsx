@@ -25,6 +25,8 @@ const translations = {
       downloading: "Downloading v{{version}}",
       check_now: "Check now",
       checking: "Checking",
+      manual_updates_title: "Manual updates",
+      manual_updates_description: "Use a verified Desktop package during a maintenance window.",
     },
   },
 };
@@ -75,6 +77,15 @@ describe("UpdatesSettingsTab", () => {
         checkForUpdates: mocks.checkForUpdates,
       },
     });
+  });
+
+  it("shows manual maintenance without an automatic switch or check button", async () => {
+    mocks.getPreferences.mockResolvedValue({ automaticUpdates: false, mode: "manual" });
+    render(<UpdatesSettingsTab />);
+    expect(await screen.findByText("Manual updates")).toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Check now" })).not.toBeInTheDocument();
+    expect(mocks.checkForUpdates).not.toHaveBeenCalled();
   });
 
   it("loads the persisted preference and saves changes from the switch", async () => {

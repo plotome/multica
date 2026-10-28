@@ -1232,6 +1232,8 @@
     "updates": {
       "title": "アップデート",
       "current_version": "現在のバージョン",
+      "manual_updates_title": "手動アップデート",
+      "manual_updates_description": "メンテナンス時に検証済みのデスクトップパッケージをインストールします。ワークスペースと設定は保持されます。",
       "automatic_updates_title": "バックグラウンドで自動アップデート",
       "automatic_updates_description": "有効にすると、起動直後と 1 時間ごとにアップデートを確認し、利用可能なバージョンをバックグラウンドでダウンロードします。",
       "automatic_updates_save_failed": "自動アップデート設定を保存できませんでした",

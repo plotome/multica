@@ -43,7 +43,8 @@ else if (args.join(" ") === "rev-parse --short HEAD") console.log("abc1234");
 else if (args.join(" ") === "rev-parse HEAD") {
   if (process.env.TEST_MISSING_REVISION === "true") process.exit(1);
   console.log(process.cwd() === process.env.TEST_SOURCE_ROOT ? ${JSON.stringify(fullRevision)} : "b".repeat(40));
-} else process.exit(2);
+} else if (args[0] === "status") process.exit(0);
+else process.exit(2);
 `);
         fakeExecutable(join(bin, "go"), `
 const args = process.argv.slice(2);
@@ -70,9 +71,33 @@ else if (args[0] === "build") {
         assert.equal(build.cgo, "0");
         const artifact = platform === "win32" ? "multica.exe" : "multica";
         assert.equal(readFileSync(join(root, "apps", "desktop", "resources", "bin", artifact), "utf8"), "fake artifact");
+        const identity = JSON.parse(readFileSync(join(root, "apps", "desktop", "resources", "desktop-release.json"), "utf8"));
+        assert.equal(identity.commit, missingRevision ? "" : fullRevision);
+        assert.equal(identity.platform, platform);
+        assert.equal(identity.arch, arch);
+        assert.equal(identity.update_mode, "manual");
+        assert.equal(identity.source_clean, true);
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
     });
   }
 }
+
+test("missing Go fails instead of shipping a package that downloads a CLI at runtime", () => {
+  const root = mkdtempSync(join(tmpdir(), "multica-no-go-"));
+  try {
+    const scripts = join(root, "apps", "desktop", "scripts");
+    const bin = join(root, "empty-bin");
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(bin);
+    for (const name of ["bundle-cli.mjs", "package.mjs"]) {
+      copyFileSync(join(scriptDir, name), join(scripts, name));
+    }
+    assert.throws(() => execFileSync(process.execPath, [join(scripts, "bundle-cli.mjs")], {
+      cwd: root, env: { PATH: bin, HOME: root }, stdio: "pipe",
+    }), /Go is required/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

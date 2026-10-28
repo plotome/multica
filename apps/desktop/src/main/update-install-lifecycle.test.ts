@@ -24,10 +24,15 @@ const ctx = vi.hoisted(() => ({
   finishStart: null as null | (() => void),
   quit: vi.fn(),
   install: vi.fn(),
+  isPackaged: false,
+  bundledPresent: true,
+  bundledUsable: true,
+  managedCliPath: vi.fn(() => "/review-only/managed-cli"),
 }));
 
 vi.mock("electron", () => ({
   app: {
+    get isPackaged() { return ctx.isPackaged; },
     on: (name: string, listener: Handler) => {
       ctx.listeners.set(name, [...(ctx.listeners.get(name) ?? []), listener]);
     },
@@ -64,12 +69,11 @@ vi.mock("./updater-preferences", () => ({
 }));
 
 vi.mock("./cli-bootstrap", () => ({
-  managedCliPath: () => "/review-only/managed-cli",
-  ensureManagedCli: vi.fn(async () => "/review-only/managed-cli"),
+  managedCliPath: ctx.managedCliPath,
 }));
 
 vi.mock("fs", () => ({
-  existsSync: () => true,
+  existsSync: (path: string) => path.includes("resources/bin") ? ctx.bundledPresent : true,
   watchFile: vi.fn(),
   unwatchFile: vi.fn(),
 }));
@@ -92,7 +96,7 @@ vi.mock("./daemon-port", () => ({
 }));
 vi.mock("child_process", () => ({
   execFile: vi.fn((_file: string, args: string[], _opts: unknown, cb: (err: Error | null, stdout: string) => void) => {
-    if (args[0] === "version") cb(null, '{"version":"0.7.0"}');
+    if (args[0] === "version") cb(null, ctx.bundledUsable ? '{"version":"0.7.0"}' : 'broken');
     else if (args[0] === "daemon" && args[1] === "stop") {
       ctx.stops++;
       ctx.health = null;
@@ -153,6 +157,10 @@ beforeEach(() => {
   ctx.updaterListeners.clear();
   ctx.ipc.clear();
   ctx.autoStop = false;
+  ctx.isPackaged = false;
+  ctx.bundledPresent = true;
+  ctx.bundledUsable = true;
+  ctx.managedCliPath.mockClear();
   ctx.quits = 0;
   ctx.stops = 0;
   ctx.starts = 0;
@@ -172,6 +180,29 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe("packaged Fork CLI resolution", () => {
+  it.each(["missing", "unusable"])("fails closed with a %s bundled CLI without download or PATH substitution", async (reason) => {
+    ctx.isPackaged = true;
+    ctx.bundledPresent = reason !== "missing";
+    ctx.bundledUsable = reason !== "unusable";
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const { execFile } = await import("child_process");
+    vi.mocked(execFile).mockClear();
+    const manager = await import("./daemon-manager");
+    manager.setupDaemonManager(() => null);
+    expect(await ipc("daemon:start")).toMatchObject({ success: false });
+    expect(ctx.managedCliPath).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    for (const call of vi.mocked(execFile).mock.calls) {
+      expect(String(call[0])).toContain("resources/bin/multica");
+      expect(call[1]).toEqual(["version", "--output", "json"]);
+    }
+    expect(ctx.starts).toBe(0);
+  });
 });
 
 describe("Windows update and daemon lifecycle coordination", () => {

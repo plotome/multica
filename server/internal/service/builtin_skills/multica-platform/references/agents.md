@@ -386,14 +386,13 @@ State-changing (require an explicit instruction — do not run speculatively):
 ### Runtime-generated environment and application approval
 
 Codex snapshots exact environment names for each task. A runtime that creates
-additional names later needs an owner-managed `CODEX_RUNTIME_ENV_MANIFEST` in
-agent env: `{"schema":1,"id":"reviewed-runtime-version","names":["EXACT_NAME"]}`.
-This is off by default. Only persisted agent env is authoritative; inherited or
-process-local copies do not enable it. Names must be uppercase and exact;
-credentials, wildcards and environment/sandbox controls are rejected. Values
-are produced by the runtime itself. Review a new manifest before enabling it;
-do not invent trusted-service data or expand the untrusted worker allowlist.
-Agent credentials cannot set this manifest through agent creation or env APIs.
+additional names later, or needs fixed bootstrap values, is described by the
+device owner in the host-local `~/.multica/codex-runtime.json` (daemon user only,
+outside workspaces), not in agent env. It is off when absent; an invalid file
+fails Codex tasks instead of silently launching without it. Agents cannot grant
+it: there is no API or `custom_env` path, and a `custom_env` entry that collides
+with a fixed value fails the task. Do not invent trusted-service data or expand
+the untrusted worker allowlist; regenerate the file from the installed runtime.
 
 Native computer-use MCP application requests in Codex require the human device
 owner's choice in the run transcript (Web or Desktop). The original message,

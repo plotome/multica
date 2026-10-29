@@ -29,9 +29,10 @@ var shellEnvBlockRe = regexp.MustCompile(
 		`.*?^` + regexp.QuoteMeta(multicaShellEnvEndMarker) + `\n*`)
 
 type codexShellEnvironmentPolicy struct {
-	Inherit               string   `toml:"inherit"`
-	IgnoreDefaultExcludes bool     `toml:"ignore_default_excludes"`
-	IncludeOnly           []string `toml:"include_only"`
+	Inherit               string            `toml:"inherit"`
+	IgnoreDefaultExcludes bool              `toml:"ignore_default_excludes"`
+	IncludeOnly           []string          `toml:"include_only"`
+	Set                   map[string]string `toml:"set,omitempty"`
 }
 
 type tomlByteRange struct {
@@ -109,12 +110,16 @@ func codexDefaultExcludesEnvKey(upperKey string) bool {
 		strings.Contains(upperKey, "TOKEN")
 }
 
-func renderMulticaShellEnvBlock(includeOnly []string) (string, error) {
-	policy, err := toml.Marshal(codexShellEnvironmentPolicy{
+func renderMulticaShellEnvBlock(includeOnly []string, set map[string]string) (string, error) {
+	if len(set) == 0 {
+		set = nil
+	}
+	policy, err := toml.Marshal(map[string]any{shellEnvironmentPolicyKey: codexShellEnvironmentPolicy{
 		Inherit:               "all",
 		IgnoreDefaultExcludes: true,
 		IncludeOnly:           includeOnly,
-	})
+		Set:                   set,
+	}})
 	if err != nil {
 		return "", fmt.Errorf("render shell_environment_policy: %w", err)
 	}
@@ -122,9 +127,6 @@ func renderMulticaShellEnvBlock(includeOnly []string) (string, error) {
 	var b strings.Builder
 	b.WriteString(multicaShellEnvBeginMarker)
 	b.WriteByte('\n')
-	b.WriteString("[")
-	b.WriteString(shellEnvironmentPolicyKey)
-	b.WriteString("]\n")
 	b.Write(bytes.TrimRight(policy, "\n"))
 	b.WriteByte('\n')
 	b.WriteString(multicaShellEnvEndMarker)
@@ -257,8 +259,9 @@ func removeTOMLByteRanges(content []byte, ranges []tomlByteRange) ([]byte, error
 
 // EnsureCodexShellEnvPolicyConfig replaces every user/profile shell policy in
 // the task-local config with one validated daemon-managed policy. The source
-// config in the user's shared Codex home is never modified.
-func EnsureCodexShellEnvPolicyConfig(configPath string, includeOnly []string, logger *slog.Logger) error {
+// config in the user's shared Codex home is never modified. Codex applies set
+// before include_only, so every set name must also be in includeOnly.
+func EnsureCodexShellEnvPolicyConfig(configPath string, includeOnly []string, set map[string]string, logger *slog.Logger) error {
 	data, err := os.ReadFile(configPath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read config.toml: %w", err)
@@ -269,7 +272,7 @@ func EnsureCodexShellEnvPolicyConfig(configPath string, includeOnly []string, lo
 	if err != nil {
 		return err
 	}
-	block, err := renderMulticaShellEnvBlock(includeOnly)
+	block, err := renderMulticaShellEnvBlock(includeOnly, set)
 	if err != nil {
 		return err
 	}

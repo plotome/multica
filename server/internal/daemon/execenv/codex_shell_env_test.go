@@ -211,7 +211,7 @@ foo = true
 				t.Fatalf("write config.toml: %v", err)
 			}
 
-			if err := EnsureCodexShellEnvPolicyConfig(configPath, includeOnly, testLogger()); err != nil {
+			if err := EnsureCodexShellEnvPolicyConfig(configPath, includeOnly, nil, testLogger()); err != nil {
 				t.Fatalf("EnsureCodexShellEnvPolicyConfig: %v", err)
 			}
 			data, err := os.ReadFile(configPath)
@@ -255,7 +255,7 @@ func TestEnsureCodexShellEnvPolicyConfigRejectsInvalidInputWithoutWriting(t *tes
 	if err := os.WriteFile(configPath, existing, 0o644); err != nil {
 		t.Fatalf("write config.toml: %v", err)
 	}
-	if err := EnsureCodexShellEnvPolicyConfig(configPath, []string{"MULTICA_TOKEN", "PATH"}, testLogger()); err == nil {
+	if err := EnsureCodexShellEnvPolicyConfig(configPath, []string{"MULTICA_TOKEN", "PATH"}, nil, testLogger()); err == nil {
 		t.Fatal("expected malformed input to fail")
 	}
 	got, err := os.ReadFile(configPath)
@@ -273,7 +273,7 @@ func TestEnsureCodexShellEnvPolicyConfigIsIdempotent(t *testing.T) {
 	includeOnly := []string{"MULTICA_SERVER_URL", "MULTICA_TOKEN", "PATH"}
 
 	for i := 0; i < 3; i++ {
-		if err := EnsureCodexShellEnvPolicyConfig(configPath, includeOnly, testLogger()); err != nil {
+		if err := EnsureCodexShellEnvPolicyConfig(configPath, includeOnly, nil, testLogger()); err != nil {
 			t.Fatalf("pass %d: %v", i, err)
 		}
 	}

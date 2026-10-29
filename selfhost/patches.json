@@ -14,10 +14,18 @@
       "required_tests": []
     },
     {
-      "id": "owner-runtime-environment-manifest",
+      "id": "host-codex-runtime-config",
       "introduced_by": "58130e2f98c9b5175e0523c46a0c78584a5665e0",
-      "required_files": ["server/internal/daemon/execenv/runtime_manifest.go"],
-      "required_tests": ["TestRuntimeEnvManifest"]
+      "required_files": ["server/internal/daemon/execenv/codex_runtime_config.go", "docs/runtime-application-approval.md"],
+      "absent_files": ["server/internal/daemon/execenv/runtime_manifest.go"],
+      "required_tests": [
+        "TestCodexRuntimeConfigValidation",
+        "TestCodexRuntimeConfigFileTrust",
+        "TestCodexRuntimeFixedValuesSurviveShellPolicy",
+        "TestCodexRuntimeRehomesNamedMCPServer",
+        "TestCodexRuntimeConfigTaskPolicy",
+        "TestDaemonCodexRuntimeConfigScopeAndFailure"
+      ]
     },
     {
       "id": "device-owner-application-approvals",

@@ -139,15 +139,6 @@ func TestTaskElicitationExpiryAndDenialNeverGrant(t *testing.T) {
 	}
 }
 
-func TestAgentCreateRuntimeManifestMachineDenied(t *testing.T) {
-	if testHandler == nil {
-		t.Fatal("isolated database is required")
-	}
-	req := newRequest("POST", "/", map[string]any{"name": "must not create", "custom_env": map[string]string{"CODEX_RUNTIME_ENV_MANIFEST": `{"schema":1,"id":"self-grant","names":["LATE_PATH"]}`}})
-	req.Header.Set("X-Actor-Source", "task_token")
-	testutil.Call(t, testHandler.CreateAgent, req).Want(403)
-}
-
 func TestWorkspaceDeleteRemovesTaskElicitationsAndPreservesNeighbor(t *testing.T) {
 	f := newWorkspaceDeletePathFixture(t, "elicitations")
 	dbfx.Cleanup(t, `DELETE FROM task_elicitation WHERE workspace_id = ANY($1::uuid[])`, []string{f.victimID, f.neighbourID})

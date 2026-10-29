@@ -345,7 +345,7 @@ func TestConfigureCodexTaskShellEnvironment(t *testing.T) {
 	t.Run("non-Codex runtime is unchanged", func(t *testing.T) {
 		t.Parallel()
 		codexHome := t.TempDir()
-		if err := configureCodexTaskShellEnvironment("claude", codexHome, nil, nil, nil, slog.Default()); err != nil {
+		if err := configureCodexTaskShellEnvironment("claude", codexHome, nil, nil, nil, nil, slog.Default()); err != nil {
 			t.Fatalf("configureCodexTaskShellEnvironment: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(codexHome, "config.toml")); !os.IsNotExist(err) {
@@ -374,7 +374,7 @@ func TestConfigureCodexTaskShellEnvironment(t *testing.T) {
 			"CUSTOM_ACCESS_TOKEN": "agent-secret",
 			"CUSTOM_FLAG":         "enabled",
 		}
-		if err := configureCodexTaskShellEnvironment("codex", codexHome, inherited, agentEnv, agentCustomEnv, slog.Default()); err != nil {
+		if err := configureCodexTaskShellEnvironment("codex", codexHome, inherited, agentEnv, agentCustomEnv, nil, slog.Default()); err != nil {
 			t.Fatalf("configureCodexTaskShellEnvironment: %v", err)
 		}
 		data, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
@@ -396,7 +396,7 @@ func TestConfigureCodexTaskShellEnvironment(t *testing.T) {
 
 	t.Run("Codex without task home fails closed", func(t *testing.T) {
 		t.Parallel()
-		err := configureCodexTaskShellEnvironment("codex", "", nil, map[string]string{"MULTICA_TOKEN": "mat_task"}, nil, slog.Default())
+		err := configureCodexTaskShellEnvironment("codex", "", nil, map[string]string{"MULTICA_TOKEN": "mat_task"}, nil, nil, slog.Default())
 		if err == nil || !strings.Contains(err.Error(), "CODEX_HOME is missing") {
 			t.Fatalf("error = %v, want missing CODEX_HOME", err)
 		}
@@ -432,7 +432,7 @@ func TestCodexTaskShellEnvInheritsRealHome(t *testing.T) {
 		"MULTICA_SERVER_URL":       "https://task.example",
 	}
 
-	if err := configureCodexTaskShellEnvironment("codex", codexHome, inherited, explicit, nil, slog.Default()); err != nil {
+	if err := configureCodexTaskShellEnvironment("codex", codexHome, inherited, explicit, nil, nil, slog.Default()); err != nil {
 		t.Fatalf("configureCodexTaskShellEnvironment: %v", err)
 	}
 
@@ -6912,44 +6912,69 @@ func TestHermesProfileChainCoversLaunchPrefix(t *testing.T) {
 	}
 }
 
-func TestRuntimeManifestTaskPolicy(t *testing.T) {
-	manifest := `{"schema":1,"id":"fixture-v1","names":["LATE_RUNTIME_PATH"]}`
-	for _, source := range []string{"owner", "inherited", "explicit"} {
-		t.Run(source, func(t *testing.T) {
-			home := t.TempDir()
-			custom := map[string]string{}
-			explicit := map[string]string{}
-			inherited := []string{}
-			switch source {
-			case "owner":
-				custom["CODEX_RUNTIME_ENV_MANIFEST"] = manifest
-			case "explicit":
-				explicit["CODEX_RUNTIME_ENV_MANIFEST"] = manifest
-			case "inherited":
-				inherited = append(inherited, "CODEX_RUNTIME_ENV_MANIFEST="+manifest)
-			}
-			if err := configureCodexTaskShellEnvironment("codex", home, inherited, explicit, custom, slog.Default()); err != nil {
-				t.Fatal(err)
-			}
-			b, err := os.ReadFile(filepath.Join(home, "config.toml"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.Contains(string(b), "LATE_RUNTIME_PATH") != (source == "owner") {
-				t.Fatalf("late name authorization source=%s config=%s", source, b)
-			}
-		})
+func TestCodexRuntimeConfigTaskPolicy(t *testing.T) {
+	cfg, err := execenv.ParseCodexRuntimeConfig([]byte(`{"schema":1,"id":"fixture-v1","include_only":["LATE_RUNTIME_PATH"],"set":{"FIXED_BOOT":"owner-value"},"task_home_mcp_servers":["cu"]}`))
+	if err != nil {
+		t.Fatal(err)
 	}
 	home := t.TempDir()
 	path := filepath.Join(home, "config.toml")
-	before := []byte("# untouched\n")
-	os.WriteFile(path, before, 0600)
-	err := configureCodexTaskShellEnvironment("codex", home, nil, nil, map[string]string{"CODEX_RUNTIME_ENV_MANIFEST": `{"schema":1,"id":"bad","names":["NODE_OPTIONS"]}`}, slog.Default())
-	if err == nil {
-		t.Fatal("unsafe manifest must fail")
+	os.WriteFile(path, []byte("[mcp_servers.cu]\ncommand='node'\n[mcp_servers.cu.env]\nCODEX_HOME='/owner'\n"), 0o600)
+	if err := configureCodexTaskShellEnvironment("codex", home, nil, nil, nil, cfg, slog.Default()); err != nil {
+		t.Fatal(err)
 	}
-	after, _ := os.ReadFile(path)
-	if string(after) != string(before) {
-		t.Fatal("invalid manifest modified config")
+	b, _ := os.ReadFile(path)
+	for _, want := range []string{"LATE_RUNTIME_PATH", "FIXED_BOOT = 'owner-value'"} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("config missing %q:\n%s", want, b)
+		}
+	}
+	if strings.Contains(string(b), "/owner") {
+		t.Fatalf("owner Codex home kept:\n%s", b)
+	}
+
+	// An agent value must not override an owner-fixed value.
+	other := t.TempDir()
+	before := []byte("# untouched\n")
+	os.WriteFile(filepath.Join(other, "config.toml"), before, 0o600)
+	err = configureCodexTaskShellEnvironment("codex", other, nil, nil, map[string]string{"fixed_boot": "agent"}, cfg, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "conflicts with fixed value") {
+		t.Fatalf("custom_env override accepted: %v", err)
+	}
+	if after, _ := os.ReadFile(filepath.Join(other, "config.toml")); string(after) != string(before) {
+		t.Fatal("rejected task modified config")
+	}
+
+	// A late name never becomes trusted through agent or inherited environment.
+	plain := t.TempDir()
+	if err := configureCodexTaskShellEnvironment("codex", plain, []string{"LATE_RUNTIME_PATH=x"}, nil, map[string]string{"CODEX_RUNTIME_ENV_MANIFEST": `{"schema":1,"id":"x","names":["SELF_GRANT"]}`}, nil, slog.Default()); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(plain, "config.toml")); strings.Contains(string(b), "SELF_GRANT") || strings.Contains(string(b), "set") {
+		t.Fatalf("runtime policy granted without host config:\n%s", b)
+	}
+}
+
+func TestDaemonCodexRuntimeConfigScopeAndFailure(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "host")
+	os.Mkdir(dir, 0o755)
+	path := filepath.Join(dir, "codex-runtime.json")
+	d := &Daemon{cfg: Config{CodexRuntimeConfigPath: path, WorkspacesRoot: filepath.Join(t.TempDir(), "ws")}}
+	if cfg, err := d.codexRuntimeConfigFor("codex", "a1"); cfg != nil || err != nil {
+		t.Fatal("absent config must be off", cfg, err)
+	}
+	os.WriteFile(path, []byte(`{"schema":1,"id":"v","include_only":["A"],"agent_ids":["a1"]}`), 0o600)
+	if cfg, err := d.codexRuntimeConfigFor("codex", "a1"); cfg == nil || err != nil {
+		t.Fatal("scoped agent not configured", err)
+	}
+	if cfg, err := d.codexRuntimeConfigFor("codex", "a2"); cfg != nil || err != nil {
+		t.Fatal("unscoped agent configured", err)
+	}
+	if cfg, _ := d.codexRuntimeConfigFor("claude", "a1"); cfg != nil {
+		t.Fatal("non-Codex runtime configured")
+	}
+	os.WriteFile(path, []byte(`{"schema":1,"id":"v","include_only":["NODE_OPTIONS"]}`), 0o600)
+	if _, err := d.codexRuntimeConfigFor("codex", "a1"); err == nil {
+		t.Fatal("invalid config must fail the task")
 	}
 }

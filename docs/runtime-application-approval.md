@@ -44,7 +44,7 @@ secret in `COMPUTER_USE_CARD_SECRET`; unset values disable this relay. The
 service must verify its owner callback before signing, and commit/verify the
 grant before the existing card reply/wakeup proceeds. This is a trusted service
 bridge, not a claim of isolation from another process running as the same OS
-user. Do not pass either secret to agent runtime manifests.
+user. Do not put either secret in the Codex runtime config.
 
 `multica application-approval get TASK REQUEST` lets that configured service
 reconcile owner answers made in Multica. `respond ... --choice CHOICE
@@ -73,26 +73,46 @@ must establish the intended input boundary. A separate approval device is the
 stronger deployment option when the execution environment can control the
 operator's desktop independently.
 
-## Runtime environment manifests
+## Host Codex runtime config
 
-`CODEX_RUNTIME_ENV_MANIFEST` is read only from persisted owner-managed agent env.
-For example, an explicitly reviewed LCU 0.12.1/macOS manifest is:
+A locally installed Codex runtime extension (for example a computer-use MCP
+server) can create environment variables after the daemon snapshot and launch
+its kernel through `codex sandbox`, whose task shell policy would drop them.
+The owner describes what that runtime needs in a host-local JSON file, read by
+the daemon for every Codex task (no restart after regeneration):
+
+- Path: `~/.multica/codex-runtime.json`, or `MULTICA_CODEX_RUNTIME_CONFIG` in the
+  daemon environment. Absent file means off.
+- The file must be a regular file (not a symlink) owned by the daemon user, and
+  neither it nor its directory may be group- or world-writable. It must live
+  outside the workspaces root. Any invalid or untrusted file fails the task;
+  it never degrades to launching without the runtime.
 
 ```json
-{"schema":1,"id":"lcu-0.12.1-macos-reviewed","names":["NODE_REPL_TRUSTED_SERVICES","NODE_REPL_TRUSTED_CODE_PATHS","NODE_REPL_NODE_MODULE_DIRS","NODE_REPL_NODE_PATH","SKY_CUA_SERVICE_PATH","LCU_MAC_SKY_SERVICE_PATH","LCU_MAC_SKY_CLIENT_PATH","LCU_MAC_LIFETIME_SOCKET"]}
+{
+  "schema": 1,
+  "id": "runtime-and-version-provenance",
+  "agent_ids": ["optional agent UUIDs; omit for every Codex agent"],
+  "include_only": ["LATE_RUNTIME_NAME"],
+  "set": {"FIXED_BOOTSTRAP_NAME": "owner-reviewed value"},
+  "task_home_mcp_servers": ["mcp-server-name"]
+}
 ```
 
-This example is a review input, not automatic enablement. Record the exact LCU,
-ChatGPT/CUA, bundled Codex, native CLI, adapter hashes, host version and actual
-consumer validation alongside the manifest. A version update requires review
-and a new validation record; it does not require adding runtime-specific names
-to Multica code. Optional control sockets are not prerequisites for getState.
+`include_only` adds exact names whose values the runtime itself produces. `set`
+fixes values; its names are also kept by the filter (Codex applies `set` before
+`include_only`), and an agent `custom_env` entry with the same name fails the
+task instead of overriding it. `task_home_mcp_servers` rebinds the named MCP
+registrations copied from the owner's Codex config to the task `CODEX_HOME` and
+drops owner tool `approval_mode`; an inline registration fails because it cannot
+be isolated. Names must be uppercase and exact. Credentials, wildcards,
+Multica/Codex/loader/shell controls, `NODE_OPTIONS`, `NODE_PATH`, request
+metadata and anything naming sandbox, permission or approval are rejected. The
+untrusted Node worker allowlist may appear only in `set`, never as a pass-through.
 
-The manifest only extends exact names in the existing policy. It does not set
-values, copy profiles, alter CODEX_HOME, disable sandboxing, or add names to the
-untrusted Node worker allowlist. Invalid versions, unknown fields, duplicate
-names, wildcard names, credentials and environment-control names fail before
-writing configuration. Existing inherited-secret filtering is unchanged.
+Multica code carries no runtime names or versions. Generate the file from the
+installed runtime, record its provenance in `id`, and validate a real consumer
+in a fresh task after each runtime update.
 
 ## Deployment and rollback
 
@@ -104,13 +124,13 @@ A new daemon against an old server cancels approval rather than granting it.
 
 Install and trust the original LCU native adapter and lifecycle hooks using its
 supported setup flow in the intended configuration scope; inspect the task's
-copied hooks/trust and manifest before enabling the pilot. This change alone
+copied hooks/trust and runtime config before enabling the pilot. This change alone
 does not register LCU. Validate each real consumer in a new session, including
 refuse, cancel, stop, background action, result readback and uninterrupted user
 input. Fixture tests are not desktop acceptance.
 
 For rollback, stop accepting new pilot runs, cancel/finish existing runs, remove
-the owner-managed manifest, then restore the previous daemon/server/UI versions.
+the host Codex runtime config, then restore the previous daemon/server/UI versions.
 Keep the additive tables during application rollback; they are not read by old
 versions. A later schema rollback may remove 596, 595, 594, then 593 after confirming
 no new server remains. Do not restart the daemon that hosts the upgrade task.

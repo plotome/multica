@@ -8753,7 +8753,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		agentEnv["MULTICA_DSH_SESSION_ROOT"] = dshSessionRoot
 		agentEnv["DSH_TELEMETRY_DISABLED"] = "1"
 	}
-	if err := configureCodexTaskShellEnvironment(provider, env.CodexHome, os.Environ(), agentEnv, agentCustomEnv, d.logger); err != nil {
+	codexRuntimeCfg, err := d.codexRuntimeConfigFor(provider, task.AgentID)
+	if err != nil {
+		return TaskResult{}, err
+	}
+	if err := configureCodexTaskShellEnvironment(provider, env.CodexHome, os.Environ(), agentEnv, agentCustomEnv, codexRuntimeCfg, d.logger); err != nil {
 		return TaskResult{}, err
 	}
 	// The overlay is authoritative once built, so nothing on the command line
@@ -9019,7 +9023,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 				return TaskResult{}, asEnvironmentSetupFailure(fmt.Errorf("prepare fresh Codex home for resume retry: %w", err))
 			}
 			agentEnv["CODEX_HOME"] = env.CodexHome
-			if err := configureCodexTaskShellEnvironment(provider, env.CodexHome, os.Environ(), agentEnv, agentCustomEnv, d.logger); err != nil {
+			if err := configureCodexTaskShellEnvironment(provider, env.CodexHome, os.Environ(), agentEnv, agentCustomEnv, codexRuntimeCfg, d.logger); err != nil {
 				return TaskResult{}, err
 			}
 		}
@@ -11053,10 +11057,11 @@ func codexShellAuthorizedCustomEnvNames(customEnv map[string]string) []string {
 // after the task and agent custom environment are fully assembled. This makes
 // the allowlist reflect the child environment that will actually be launched,
 // including platform-specific essentials and blocklist-checked custom_env
-// credentials.
+// credentials. runtimeCfg is the owner's host-local runtime config already
+// selected for this agent (nil when none applies).
 // Failure is fatal: launching with an unowned or malformed policy could either
 // drop the task-scoped token again or expose inherited daemon credentials.
-func configureCodexTaskShellEnvironment(provider, codexHome string, inherited []string, agentEnv, agentCustomEnv map[string]string, logger *slog.Logger) error {
+func configureCodexTaskShellEnvironment(provider, codexHome string, inherited []string, agentEnv, agentCustomEnv map[string]string, runtimeCfg *execenv.CodexRuntimeConfig, logger *slog.Logger) error {
 	if provider != "codex" {
 		return nil
 	}
@@ -11065,26 +11070,52 @@ func configureCodexTaskShellEnvironment(provider, codexHome string, inherited []
 	}
 	authorizedExplicit := codexShellAuthorizedCustomEnvNames(agentCustomEnv)
 	includeOnly := execenv.CodexShellEnvAllowlist(inherited, agentEnv, authorizedExplicit)
-	lateNames, err := execenv.RuntimeEnvNames(agentCustomEnv)
-	if err != nil {
-		return fmt.Errorf("configure Codex shell environment: %w", err)
-	}
 	seen := make(map[string]bool, len(includeOnly))
 	for _, name := range includeOnly {
 		seen[strings.ToUpper(name)] = true
 	}
-	for _, name := range lateNames {
-		if !seen[name] {
-			includeOnly = append(includeOnly, name)
-			seen[name] = true
+	var set map[string]string
+	if runtimeCfg != nil {
+		for key := range agentCustomEnv {
+			if _, fixed := runtimeCfg.Set[strings.ToUpper(key)]; fixed {
+				return fmt.Errorf("configure Codex shell environment: agent custom_env %s conflicts with fixed value in Codex runtime config %q", key, runtimeCfg.ID)
+			}
 		}
+		for _, name := range runtimeCfg.ShellNames() {
+			if !seen[name] {
+				includeOnly = append(includeOnly, name)
+				seen[name] = true
+			}
+		}
+		set = runtimeCfg.Set
 	}
 	sort.Strings(includeOnly)
 	configPath := filepath.Join(codexHome, "config.toml")
-	if err := execenv.EnsureCodexShellEnvPolicyConfig(configPath, includeOnly, logger); err != nil {
+	if runtimeCfg != nil {
+		if err := execenv.RehomeCodexMCPServers(configPath, codexHome, runtimeCfg.TaskHomeMCPServers); err != nil {
+			return fmt.Errorf("configure Codex runtime: %w", err)
+		}
+	}
+	if err := execenv.EnsureCodexShellEnvPolicyConfig(configPath, includeOnly, set, logger); err != nil {
 		return fmt.Errorf("configure Codex shell environment: %w", err)
 	}
 	return nil
+}
+
+// codexRuntimeConfigFor reads the host-local runtime config on every task so
+// a regenerated file applies without restarting the daemon.
+func (d *Daemon) codexRuntimeConfigFor(provider, agentID string) (*execenv.CodexRuntimeConfig, error) {
+	if provider != "codex" {
+		return nil, nil
+	}
+	cfg, err := execenv.LoadCodexRuntimeConfig(d.cfg.CodexRuntimeConfigPath, d.cfg.WorkspacesRoot)
+	if err != nil {
+		return nil, fmt.Errorf("configure Codex runtime: %w", err)
+	}
+	if !cfg.AppliesTo(agentID) {
+		return nil, nil
+	}
+	return cfg, nil
 }
 
 func defaultArgsForProvider(cfg Config, provider string) []string {

@@ -332,7 +332,7 @@ trusted_hash = "reviewed-native-hook-hash"
 	if err := sanitizeCopiedCodexConfig(path, "/shared", home); err != nil {
 		t.Fatal(err)
 	}
-	if err := EnsureCodexShellEnvPolicyConfig(path, []string{"NODE_REPL_TRUSTED_SERVICES"}, nil); err != nil {
+	if err := EnsureCodexShellEnvPolicyConfig(path, []string{"NODE_REPL_TRUSTED_SERVICES"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(path)

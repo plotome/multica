@@ -114,6 +114,7 @@ type Config struct {
 	Profile                        string                // profile name (empty = default)
 	Agents                         map[string]AgentEntry // keyed by provider: claude, codebuddy, codex, copilot, opencode, codearts, deveco, openclaw, hermes, pi, cursor, kimi, reasonix, dsh, kiro, antigravity, qoder, qoderclicn, traecli, grok, qwen, qwenpaw, mcode, dim, zeroclaw (plus built-in runtime identities from agent.BuiltinRuntimes, e.g. omp)
 	WorkspacesRoot                 string                // base path for execution envs (default: ~/multica_workspaces)
+	CodexRuntimeConfigPath         string                // host-local Codex runtime config (default: ~/.multica/codex-runtime.json)
 	HealthPort                     int                   // local HTTP port for health checks (default: 19514)
 	MaxConcurrentTasks             int                   // max tasks running in parallel (default: 20)
 	GCEnabled                      bool                  // enable periodic workspace garbage collection (default: true)
@@ -536,6 +537,11 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		return Config{}, err
 	}
 
+	codexRuntimeConfigPath, err := execenv.DefaultCodexRuntimeConfigPath()
+	if err != nil {
+		return Config{}, err
+	}
+
 	// Health port: override > default
 	healthPort := DefaultHealthPort
 	if overrides.HealthPort > 0 {
@@ -646,6 +652,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		Profile:                         profile,
 		Agents:                          agents,
 		WorkspacesRoot:                  workspacesRoot,
+		CodexRuntimeConfigPath:          codexRuntimeConfigPath,
 		GCEnabled:                       gcEnabled,
 		GCInterval:                      gcInterval,
 		GCTTL:                           gcTTL,

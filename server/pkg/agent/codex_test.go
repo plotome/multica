@@ -4844,7 +4844,9 @@ func executeFakeCodexCollectingMessagesWithConfig(t *testing.T, fakePath string,
 		mu       sync.Mutex
 		messages []Message
 	)
+	messagesDone := make(chan struct{})
 	go func() {
+		defer close(messagesDone)
 		for msg := range session.Messages {
 			mu.Lock()
 			messages = append(messages, msg)
@@ -4855,6 +4857,11 @@ func executeFakeCodexCollectingMessagesWithConfig(t *testing.T, fakePath string,
 	case result, ok := <-session.Result:
 		if !ok {
 			t.Fatal("result channel closed without a value")
+		}
+		select {
+		case <-messagesDone:
+		case <-ctx.Done():
+			t.Fatal("timeout waiting for messages to drain")
 		}
 		mu.Lock()
 		collected := append([]Message(nil), messages...)

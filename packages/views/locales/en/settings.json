@@ -1238,6 +1238,8 @@
     "updates": {
       "title": "Updates",
       "current_version": "Current version",
+      "manual_updates_title": "Manual updates",
+      "manual_updates_description": "Install a verified Desktop package during a maintenance window. Your workspace and settings are preserved.",
       "automatic_updates_title": "Automatic background updates",
       "automatic_updates_description": "Check shortly after launch and every hour, then download available updates in the background.",
       "automatic_updates_save_failed": "Failed to save automatic update settings",

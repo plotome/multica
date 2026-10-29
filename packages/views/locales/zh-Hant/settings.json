@@ -1232,6 +1232,8 @@
     "updates": {
       "title": "更新",
       "current_version": "當前版本",
+      "manual_updates_title": "手動更新",
+      "manual_updates_description": "在維護時段安裝已驗證的用戶端套件，保留工作區和設定。",
       "automatic_updates_title": "後臺自動更新",
       "automatic_updates_description": "開啟後，桌面端會在啟動後和每小時檢查更新，並在後臺下載可用版本。",
       "automatic_updates_save_failed": "儲存自動更新設定失敗",

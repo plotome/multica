@@ -1238,6 +1238,8 @@
     "updates": {
       "title": "Mises à jour",
       "current_version": "Version actuelle",
+      "manual_updates_title": "Mises à jour manuelles",
+      "manual_updates_description": "Installez un paquet Desktop vérifié pendant une fenêtre de maintenance. Votre espace de travail et vos paramètres sont conservés.",
       "automatic_updates_title": "Mises à jour automatiques en arrière-plan",
       "automatic_updates_description": "Vérifier peu après le lancement puis toutes les heures, et télécharger les mises à jour disponibles en arrière-plan.",
       "automatic_updates_save_failed": "Échec de l'enregistrement des réglages de mise à jour automatique",

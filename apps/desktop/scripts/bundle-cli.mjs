@@ -9,11 +9,10 @@
 // ldflags mirror `make build` so `multica --version` reports a meaningful
 // version / commit / date.
 //
-// Graceful: if `go` is not installed (e.g. frontend-only contributor), we
-// skip the build and fall through to auto-install at runtime. A genuine
-// Go compile error is fatal — you want that to block dev, not hide.
+// A Fork package must contain its matching CLI. Missing build tools or output
+// are fatal; runtime never downloads a replacement from another release line.
 
-import { access, chmod, copyFile, mkdir, rm } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { execFileSync, execSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
@@ -135,20 +134,11 @@ if (hasGo()) {
     },
   );
 } else {
-  console.warn(
-    "[bundle-cli] `go` not found in PATH — skipping CLI build. " +
-      "Desktop will use whatever is already in resources/bin/, or fall back " +
-      "to auto-installing the latest release at runtime.",
-  );
+  throw new Error("[bundle-cli] Go is required to build the matching Fork CLI. No runtime download is available.");
 }
 
 if (!(await exists(srcBinary))) {
-  console.warn(
-    `[bundle-cli] ${srcBinary} not present — Desktop will fall back to ` +
-      `auto-installing the latest release at runtime.`,
-  );
-  await rm(destDir, { recursive: true, force: true });
-  process.exit(0);
+  throw new Error(`[bundle-cli] Missing build output: ${srcBinary}`);
 }
 
 await rm(destDir, { recursive: true, force: true });
@@ -158,14 +148,21 @@ await chmod(destBinary, 0o755);
 
 // macOS: ad-hoc sign so Gatekeeper doesn't complain when the parent app
 // (which itself may be unsigned in dev) spawns the child.
-if (process.platform === "darwin") {
-  try {
-    execSync(`codesign -s - --force ${JSON.stringify(destBinary)}`, {
-      stdio: "pipe",
-    });
-  } catch {
-    // Non-fatal. Unsigned binaries still run when the parent app is trusted.
-  }
+if (process.platform === "darwin" && targetPlatform === "darwin") {
+  execFileSync("codesign", ["-s", "-", "--force", destBinary], { stdio: "pipe" });
 }
+
+let sourceClean = false;
+try {
+  sourceClean = execFileSync("git", ["status", "--porcelain", "--untracked-files=normal"], {
+    cwd: repoRoot, encoding: "utf8",
+  }).trim() === "";
+} catch {
+  // Development can run without Git; such a bundle cannot become a release.
+}
+await writeFile(join(destDir, "..", "desktop-release.json"), JSON.stringify({
+  commit: git("rev-parse", "HEAD"), platform: targetPlatform, arch: targetArch,
+  update_mode: "manual", source_clean: sourceClean,
+}, null, 2) + "\n");
 
 console.log(`[bundle-cli] bundled ${srcBinary} → ${destBinary}`);

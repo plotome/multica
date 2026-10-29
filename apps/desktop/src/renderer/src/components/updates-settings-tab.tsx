@@ -18,6 +18,7 @@ export function UpdatesSettingsTab() {
   const [state, setState] = useState<CheckState>({ status: "idle" });
   const [automaticUpdates, setAutomaticUpdates] = useState(true);
   const [preferencesReady, setPreferencesReady] = useState(false);
+  const [manualMode, setManualMode] = useState(false);
   const [savingPreference, setSavingPreference] = useState(false);
   const currentVersion = window.desktopAPI.appInfo.version;
 
@@ -26,7 +27,10 @@ export function UpdatesSettingsTab() {
     void window.updater
       .getPreferences()
       .then((preferences) => {
-        if (mounted) setAutomaticUpdates(preferences.automaticUpdates);
+        if (mounted) {
+          setAutomaticUpdates(preferences.automaticUpdates);
+          setManualMode(preferences.mode === "manual");
+        }
       })
       .catch(() => {
         // The main process falls back to enabled when preferences cannot be
@@ -84,63 +88,72 @@ export function UpdatesSettingsTab() {
           </span>
         </SettingsRow>
 
-        <SettingsRow
-          label={t(($) => $.desktop.updates.automatic_updates_title)}
-          description={t(($) => $.desktop.updates.automatic_updates_description)}
-        >
-          <Switch
-            checked={automaticUpdates}
-            onCheckedChange={handleAutomaticUpdatesChange}
-            disabled={!preferencesReady || savingPreference}
-            aria-label={t(($) => $.desktop.updates.automatic_updates_title)}
-          />
-        </SettingsRow>
+        {manualMode ? (
+          <SettingsRow
+            label={t(($) => $.desktop.updates.manual_updates_title)}
+            description={t(($) => $.desktop.updates.manual_updates_description)}
+          >{null}</SettingsRow>
+        ) : (
+          <>
+            <SettingsRow
+              label={t(($) => $.desktop.updates.automatic_updates_title)}
+              description={t(($) => $.desktop.updates.automatic_updates_description)}
+            >
+              <Switch
+                checked={automaticUpdates}
+                onCheckedChange={handleAutomaticUpdatesChange}
+                disabled={!preferencesReady || savingPreference}
+                aria-label={t(($) => $.desktop.updates.automatic_updates_title)}
+              />
+            </SettingsRow>
 
-        <SettingsRow
-          label={t(($) => $.desktop.updates.check_section_title)}
-          align="start"
-          description={
-            <>
-              <p>{t(($) => $.desktop.updates.check_section_description)}</p>
-              {state.status === "up-to-date" && (
-                <p className="mt-2 inline-flex items-center gap-1.5">
-                  <Check className="size-3.5 text-success" />
-                  {t(($) => $.desktop.updates.up_to_date)}
-                </p>
-              )}
-              {state.status === "available" && (
-                <p className="mt-2 inline-flex items-center gap-1.5">
-                  <ArrowDownToLine className="size-3.5 text-primary" />
-                  {t(($) => $.desktop.updates.downloading, {
-                    version: state.latestVersion,
-                  })}
-                </p>
-              )}
-              {state.status === "error" && (
-                <p className="mt-2 inline-flex items-center gap-1.5 text-destructive">
-                  <AlertCircle className="size-3.5" />
-                  {state.message}
-                </p>
-              )}
-            </>
-          }
-        >
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleCheck}
-            disabled={state.status === "checking"}
-          >
-            {state.status === "checking" ? (
-              <>
-                <Loader2 className="size-3.5 animate-spin" />
-                {t(($) => $.desktop.updates.checking)}
-              </>
-            ) : (
-              t(($) => $.desktop.updates.check_now)
-            )}
-          </Button>
-        </SettingsRow>
+            <SettingsRow
+              label={t(($) => $.desktop.updates.check_section_title)}
+              align="start"
+              description={
+                <>
+                  <p>{t(($) => $.desktop.updates.check_section_description)}</p>
+                  {state.status === "up-to-date" && (
+                    <p className="mt-2 inline-flex items-center gap-1.5">
+                      <Check className="size-3.5 text-success" />
+                      {t(($) => $.desktop.updates.up_to_date)}
+                    </p>
+                  )}
+                  {state.status === "available" && (
+                    <p className="mt-2 inline-flex items-center gap-1.5">
+                      <ArrowDownToLine className="size-3.5 text-primary" />
+                      {t(($) => $.desktop.updates.downloading, {
+                        version: state.latestVersion,
+                      })}
+                    </p>
+                  )}
+                  {state.status === "error" && (
+                    <p className="mt-2 inline-flex items-center gap-1.5 text-destructive">
+                      <AlertCircle className="size-3.5" />
+                      {state.message}
+                    </p>
+                  )}
+                </>
+              }
+            >
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleCheck}
+                disabled={!preferencesReady || state.status === "checking"}
+              >
+                {state.status === "checking" ? (
+                  <>
+                    <Loader2 className="size-3.5 animate-spin" />
+                    {t(($) => $.desktop.updates.checking)}
+                  </>
+                ) : (
+                  t(($) => $.desktop.updates.check_now)
+                )}
+              </Button>
+            </SettingsRow>
+          </>
+        )}
       </SettingsCard>
     </SettingsTab>
   );

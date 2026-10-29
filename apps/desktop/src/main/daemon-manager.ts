@@ -22,7 +22,7 @@ import type {
   LocalRuntimeProbe,
 } from "../shared/daemon-types";
 import { daemonStatusAlive } from "../shared/daemon-types";
-import { ensureManagedCli, managedCliPath } from "./cli-bootstrap";
+import { managedCliPath } from "./cli-bootstrap";
 import { decideVersionAction } from "./version-decision";
 import {
   prepareDaemonForInstall,
@@ -503,9 +503,8 @@ async function probeCliBinary(
  * Returns a usable `multica` binary path. Priority:
  *   1. Cached result from a previous successful resolve.
  *   2. Bundled binary shipped with the Desktop app (`bundle-cli.mjs`).
- *   3. Managed binary already installed in userData (`managedCliPath`).
- *   4. Download + install latest release into userData.
- *   5. `multica` on PATH (dev convenience / user-installed via brew).
+ *   3. For development only: managed binary already installed in userData.
+ *   4. For development only: `multica` on PATH.
  * Returns `null` only when all of the above fail.
  *
  * Bundled is preferred so Desktop iterates in lockstep with Go changes in
@@ -531,6 +530,13 @@ async function resolveCliBinary(): Promise<string | null> {
       }
     }
 
+    if (app.isPackaged) {
+      console.error("[daemon] Bundled Fork CLI is missing or unusable. Reinstall a verified Desktop package; no external CLI will be downloaded or substituted.");
+      cachedCliBinary = null;
+      cachedCliBinaryVersion = null;
+      return null;
+    }
+
     const managed = managedCliPath();
     if (existsSync(managed)) {
       const version = await probeCliBinary(managed, "managed");
@@ -539,23 +545,6 @@ async function resolveCliBinary(): Promise<string | null> {
         cachedCliBinaryVersion = version;
         return managed;
       }
-    }
-
-    try {
-      const installed = await ensureManagedCli({
-        forceInstall: existsSync(managed),
-      });
-      const version = await probeCliBinary(installed, "managed");
-      if (version) {
-        cachedCliBinary = installed;
-        cachedCliBinaryVersion = version;
-        return installed;
-      }
-      console.warn(
-        `[daemon] managed CLI at ${installed} failed validation after install`,
-      );
-    } catch (err) {
-      console.warn("[daemon] CLI auto-install failed, falling back to PATH:", err);
     }
 
     const onPath = findCliOnPath();

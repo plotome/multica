@@ -972,6 +972,8 @@
     "updates": {
       "title": "업데이트",
       "current_version": "현재 버전",
+      "manual_updates_title": "수동 업데이트",
+      "manual_updates_description": "유지 관리 시간에 검증된 데스크톱 패키지를 설치합니다. 워크스페이스와 설정은 유지됩니다.",
       "automatic_updates_title": "자동 백그라운드 업데이트",
       "automatic_updates_description": "사용하면 앱 실행 직후와 한 시간마다 업데이트를 확인하고 사용 가능한 버전을 백그라운드에서 다운로드합니다.",
       "automatic_updates_save_failed": "자동 업데이트 설정을 저장하지 못했습니다",

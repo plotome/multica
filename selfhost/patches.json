@@ -2,6 +2,15 @@
   "schema_version": 1,
   "patches": [
     {
+      "id": "cli-open-list-and-issue-cancel",
+      "introduced_by": "6ab3df118d7f08d09e36dad14020a97662033b4a",
+      "required_files": ["server/cmd/multica/cmd_issue_cli_gaps_test.go"],
+      "required_tests": [
+        "TestRunIssueCancelTaskByIssue",
+        "TestRunIssueListOpenFiltersByUnfinishedCategory"
+      ]
+    },
+    {
       "id": "squad-detail-route-id",
       "introduced_by": "b0842de511a4d63c256187fe11e9167ad8d05070",
       "required_files": ["packages/views/squads/components/squad-detail-page.tsx", "apps/desktop/src/renderer/src/pages/squad-detail-page.test.tsx"],

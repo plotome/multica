@@ -3954,6 +3954,7 @@ func newIssueListTestCmd() *cobra.Command {
 	cmd.Flags().String("output", "table", "")
 	cmd.Flags().Bool("full-id", false, "")
 	cmd.Flags().String("status", "", "")
+	cmd.Flags().Bool("open", false, "")
 	cmd.Flags().String("priority", "", "")
 	cmd.Flags().String("assignee", "", "")
 	cmd.Flags().String("assignee-id", "", "")

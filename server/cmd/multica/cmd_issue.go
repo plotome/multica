@@ -484,6 +484,8 @@ var issueCancelTaskCmd = &cobra.Command{
 	Short: "Cancel an in-progress or queued run (interrupts in-flight agent)",
 	Long: "Cancel a single run by its ID. Accepts the short ID prefix shown by `issue runs`. " +
 		"Use --issue to scope short-ID resolution to a specific issue when ambiguous. " +
+		"Without --issue, an issue key (MUL-123) or a full issue UUID cancels that issue's one " +
+		"queued or running run; it refuses when the issue has none or several, listing them. " +
 		"Triggers daemon-side interrupt of any in-flight agent so it stops emitting tool calls promptly.",
 	Args: exactArgs(1),
 	RunE: runIssueCancelTask,
@@ -633,7 +635,8 @@ func init() {
 	// issue list
 	issueListCmd.Flags().String("output", "table", "Output format: table or json")
 	issueListCmd.Flags().Bool("full-id", false, "Show full UUIDs in table output")
-	issueListCmd.Flags().String("status", "", "Filter by status")
+	issueListCmd.Flags().String("status", "", "Filter by status (comma-separated for several)")
+	issueListCmd.Flags().Bool("open", false, "Only unfinished issues: statuses in the unstarted or started category, custom statuses included. Without --open or --status the list includes done and cancelled issues (mutually exclusive with --status)")
 	issueListCmd.Flags().String("priority", "", "Filter by priority")
 	issueListCmd.Flags().String("assignee", "", "Filter by assignee name (member, agent, or squad; fuzzy match)")
 	issueListCmd.Flags().String("assignee-id", "", "Filter by assignee UUID — member, agent, or squad (mutually exclusive with --assignee)")
@@ -824,8 +827,16 @@ func runIssueList(cmd *cobra.Command, _ []string) error {
 
 	params := url.Values{}
 	params.Set("workspace_id", client.WorkspaceID)
-	if v, _ := cmd.Flags().GetString("status"); v != "" {
-		params.Set("status", v)
+	statusFilter, _ := cmd.Flags().GetString("status")
+	openOnly, _ := cmd.Flags().GetBool("open")
+	if openOnly && statusFilter != "" {
+		return fmt.Errorf("--open and --status are mutually exclusive")
+	}
+	if statusFilter != "" {
+		params.Set("status", statusFilter)
+	}
+	if openOnly {
+		params.Set("status_category", "unstarted,started")
 	}
 	if v, _ := cmd.Flags().GetString("priority"); v != "" {
 		params.Set("priority", v)
@@ -3073,16 +3084,26 @@ func runIssueCancelTask(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	issueScope := ""
-	if issueInput, _ := cmd.Flags().GetString("issue"); issueInput != "" {
+	issueInput, _ := cmd.Flags().GetString("issue")
+	if issueInput != "" {
 		issueRef, err := resolveIssueRef(ctx, client, issueInput)
 		if err != nil {
 			return fmt.Errorf("resolve issue: %w", err)
 		}
 		issueScope = issueRef.ID
 	}
-	taskRef, err := resolveTaskRunID(ctx, client, issueScope, args[0])
-	if err != nil {
-		return fmt.Errorf("resolve run: %w", err)
+	var taskRef resolvedID
+	if issueInput == "" {
+		taskRef, err = resolveActiveRunForIssueArg(ctx, client, args[0])
+		if err != nil {
+			return err
+		}
+	}
+	if taskRef.ID == "" {
+		taskRef, err = resolveTaskRunID(ctx, client, issueScope, args[0])
+		if err != nil {
+			return fmt.Errorf("resolve run: %w", err)
+		}
 	}
 
 	var result map[string]any
@@ -3101,6 +3122,45 @@ func runIssueCancelTask(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintf(os.Stdout, "Run %s -> status=%s\n", taskRef.ID, status)
 	return nil
+}
+
+// resolveActiveRunForIssueArg lets `cancel-task <issue>` stop the issue's
+// current run without first copying a full run UUID out of `issue runs`. Only
+// an issue key or a full UUID the server accepts as an issue qualifies: a short
+// hex prefix stays a run prefix, so a truncated run ID can never cancel an
+// unrelated issue's run. An empty result means the argument is not an issue.
+func resolveActiveRunForIssueArg(ctx context.Context, client *cli.APIClient, input string) (resolvedID, error) {
+	trimmed := strings.TrimSpace(input)
+	if !looksLikeIssueIdentifier(trimmed) && !uuidRegexp.MatchString(trimmed) {
+		return resolvedID{}, nil
+	}
+	issueRef, err := resolveIssueRef(ctx, client, trimmed)
+	if err != nil {
+		return resolvedID{}, fmt.Errorf("resolve issue: %w", err)
+	}
+	var result struct {
+		Tasks []map[string]any `json:"tasks"`
+	}
+	err = client.GetJSON(ctx, "/api/issues/"+url.PathEscape(issueRef.ID)+"/active-task", &result)
+	var httpErr *cli.HTTPError
+	if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound && uuidRegexp.MatchString(trimmed) {
+		return resolvedID{}, nil
+	}
+	if err != nil {
+		return resolvedID{}, fmt.Errorf("list active runs for issue %s: %w", trimmed, err)
+	}
+	switch len(result.Tasks) {
+	case 0:
+		return resolvedID{}, fmt.Errorf("issue %s has no queued or running run to cancel", trimmed)
+	case 1:
+		id := strVal(result.Tasks[0], "id")
+		return resolvedID{ID: id, Display: id}, nil
+	}
+	lines := make([]string, 0, len(result.Tasks))
+	for _, t := range result.Tasks {
+		lines = append(lines, fmt.Sprintf("  %s  %s  agent=%s", strVal(t, "id"), strVal(t, "status"), strVal(t, "agent_id")))
+	}
+	return resolvedID{}, fmt.Errorf("issue %s has %d active runs; pass the run UUID to cancel one:\n%s", trimmed, len(result.Tasks), strings.Join(lines, "\n"))
 }
 
 func runIssueSearch(cmd *cobra.Command, args []string) error {

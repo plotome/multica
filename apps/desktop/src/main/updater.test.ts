@@ -191,7 +191,7 @@ describe("setupAutoUpdater", () => {
 
   it("keeps packaged Fork builds offline and rejects every installation entry point", async () => {
     ctx.isPackaged = true;
-    setupAutoUpdater(() => null);
+    setupAutoUpdater(() => []);
     await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000);
     expect(autoUpdater.autoDownload).toBe(false);
     expect(autoUpdater.autoInstallOnAppQuit).toBe(false);
@@ -210,7 +210,7 @@ describe("setupAutoUpdater", () => {
   it("enables automatic background updates by default", async () => {
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
-    setupAutoUpdater(() => null);
+    setupAutoUpdater(() => []);
 
     await expect(invokeIpc("updater:get-preferences")).resolves.toEqual({
       automaticUpdates: true,
@@ -225,7 +225,7 @@ describe("setupAutoUpdater", () => {
       updaterPreferencesPath(ctx.userDataPath),
       JSON.stringify({ automaticUpdates: false }),
     );
-    setupAutoUpdater(() => null);
+    setupAutoUpdater(() => []);
 
     // Let the async preference load settle before advancing timers; otherwise
     // the in-flight readFile can resolve after afterEach() removes the temp
@@ -239,7 +239,7 @@ describe("setupAutoUpdater", () => {
   });
 
   it("persists the automatic update preference and stops future background checks", async () => {
-    setupAutoUpdater(() => null);
+    setupAutoUpdater(() => []);
 
     await expect(
       invokeIpc("updater:set-automatic-updates", false),
@@ -259,7 +259,7 @@ describe("setupAutoUpdater", () => {
       updaterPreferencesPath(ctx.userDataPath),
       JSON.stringify({ automaticUpdates: false }),
     );
-    setupAutoUpdater(() => null);
+    setupAutoUpdater(() => []);
 
     await expect(invokeIpc("updater:check")).resolves.toMatchObject({
       ok: true,
@@ -270,7 +270,7 @@ describe("setupAutoUpdater", () => {
 
   it("forwards update progress to a live renderer", () => {
     const { win, send } = makeWindow();
-    setupAutoUpdater(() => win);
+    setupAutoUpdater(() => [win]);
 
     emitUpdater("download-progress", { percent: 42 });
 
@@ -280,14 +280,14 @@ describe("setupAutoUpdater", () => {
   });
 
   it("skips update progress when the BrowserWindow has already been destroyed", () => {
-    setupAutoUpdater(() => makeDestroyedWindow());
+    setupAutoUpdater(() => [makeDestroyedWindow()]);
 
     expect(() => emitUpdater("download-progress", { percent: 42 })).not.toThrow();
   });
 
   it("skips update progress when the BrowserWindow webContents has already been destroyed", () => {
     const { win, send } = makeWindowWithDestroyedWebContents();
-    setupAutoUpdater(() => win);
+    setupAutoUpdater(() => [win]);
 
     expect(() => emitUpdater("download-progress", { percent: 42 })).not.toThrow();
     expect(send).not.toHaveBeenCalled();
@@ -297,7 +297,7 @@ describe("setupAutoUpdater", () => {
     const { win, send } = makeWindowWithThrowingSend(
       new TypeError("Object has been destroyed"),
     );
-    setupAutoUpdater(() => win);
+    setupAutoUpdater(() => [win]);
 
     expect(() => emitUpdater("download-progress", { percent: 42 })).not.toThrow();
     expect(send).toHaveBeenCalledWith("updater:download-progress", {
@@ -307,7 +307,7 @@ describe("setupAutoUpdater", () => {
 
   it("rethrows non-destroy errors from webContents.send", () => {
     const { win } = makeWindowWithThrowingSend(new Error("boom"));
-    setupAutoUpdater(() => win);
+    setupAutoUpdater(() => [win]);
 
     expect(() => emitUpdater("download-progress", { percent: 42 })).toThrow(
       "boom",
@@ -353,7 +353,7 @@ describe("Windows update installation", () => {
   it("keeps macOS and Linux on the existing install path", async () => {
     for (const platform of ["darwin", "linux"] as const) {
       const gate = makeGate();
-      setupAutoUpdater(() => null, { daemonGate: gate, platform });
+      setupAutoUpdater(() => [], { daemonGate: gate, platform });
       await invokeIpc("updater:install");
       expect(gate.prepare).not.toHaveBeenCalled();
     }
@@ -365,7 +365,7 @@ describe("Windows update installation", () => {
     const gate = makeGate();
     if (result === "error") gate.prepare.mockRejectedValue(new Error("probe failed"));
     else gate.prepare.mockResolvedValue({ kind: result as "ready" | "timeout" });
-    setupAutoUpdater(() => null, { daemonGate: gate, platform: "win32" });
+    setupAutoUpdater(() => [], { daemonGate: gate, platform: "win32" });
     await invokeIpc("updater:install");
     expect(ctx.quitAndInstall).toHaveBeenCalledExactlyOnceWith(false, true);
   });
@@ -374,7 +374,7 @@ describe("Windows update installation", () => {
     const gate = makeGate();
     gate.prepare.mockResolvedValueOnce({ kind: "busy", activeTasks: 2 });
     gate.confirmInstallWhileBusy.mockResolvedValue(confirmed);
-    setupAutoUpdater(() => null, { daemonGate: gate, platform: "win32" });
+    setupAutoUpdater(() => [], { daemonGate: gate, platform: "win32" });
     await invokeIpc("updater:install");
     await vi.advanceTimersByTimeAsync(60_000);
     expect(gate.confirmInstallWhileBusy).toHaveBeenCalledWith(2);
@@ -392,7 +392,7 @@ describe("Windows update installation", () => {
     gate.prepare.mockResolvedValueOnce({ kind: "busy", activeTasks: 1 });
     let confirm!: (choice: boolean) => void;
     gate.confirmInstallWhileBusy.mockImplementation(() => new Promise((resolve) => { confirm = resolve; }));
-    setupAutoUpdater(() => null, { daemonGate: gate, platform: "win32" });
+    setupAutoUpdater(() => [], { daemonGate: gate, platform: "win32" });
     emitUpdater("update-downloaded", { version: "0.7.1" });
     const manual = invokeIpc("updater:install");
     await vi.advanceTimersByTimeAsync(0);
@@ -409,7 +409,7 @@ describe("Windows update installation", () => {
     const gate = makeGate();
     if (kind === "error") gate.prepare.mockRejectedValue(new Error("probe failed"));
     else gate.prepare.mockResolvedValue(kind === "busy" ? { kind, activeTasks: 1 } : { kind });
-    setupAutoUpdater(() => null, { daemonGate: gate, platform: "win32" });
+    setupAutoUpdater(() => [], { daemonGate: gate, platform: "win32" });
     expect(emitApp("before-quit").preventDefault).not.toHaveBeenCalled();
     emitUpdater("update-downloaded", { version: "0.7.1" });
     expect(emitApp("before-quit").preventDefault).toHaveBeenCalled();
@@ -423,7 +423,7 @@ describe("Windows update installation", () => {
 
   it.each([false, true])("recovers a failed install unless the app has reached will-quit (%s)", async (quitting) => {
     const gate = makeGate();
-    setupAutoUpdater(() => null, { daemonGate: gate, platform: "win32" });
+    setupAutoUpdater(() => [], { daemonGate: gate, platform: "win32" });
     await invokeIpc("updater:install");
     if (quitting) emitApp("will-quit");
     await vi.advanceTimersByTimeAsync(10_000);

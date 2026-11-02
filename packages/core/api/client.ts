@@ -56,6 +56,7 @@ import type {
   InboxItem,
   InboxWorkspaceUnread,
   IssueSubscriber,
+  IssueUnread,
   Comment,
   CommentTriggerPreview,
   IssueTriggerPreview,
@@ -409,6 +410,8 @@ import {
   EMPTY_CREATE_FEEDBACK_RESPONSE,
   InboxUnreadSummarySchema,
   EMPTY_INBOX_UNREAD_SUMMARY,
+  IssueUnreadPageSchema,
+  EMPTY_ISSUE_UNREAD_PAGE,
   InboxItemListSchema,
   ArchivedInboxPageSchema,
   ArchivedInboxFacetsSchema,
@@ -2931,6 +2934,30 @@ export class ApiClient {
     return task;
   }
 
+  /** Every unread mark, across all pages: a row missing here reads as "read". */
+  async listIssueUnread(): Promise<IssueUnread[]> {
+    const items: IssueUnread[] = [];
+    let cursor: string | null = null;
+    do {
+      const query: string = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+      const raw = await this.fetch<unknown>(`/api/issues/unread${query}`);
+      const page = parseWithFallback(raw, IssueUnreadPageSchema, EMPTY_ISSUE_UNREAD_PAGE, {
+        endpoint: "GET /api/issues/unread",
+      });
+      items.push(...page.items);
+      cursor = page.next_cursor === cursor ? null : page.next_cursor;
+    } while (cursor);
+    return items;
+  }
+
+  async markIssueRead(issueId: string): Promise<void> {
+    await this.fetch(`/api/issues/${issueId}/read`, { method: "POST" });
+  }
+
+  async markIssueUnread(issueId: string): Promise<void> {
+    await this.fetch(`/api/issues/${issueId}/unread`, { method: "POST" });
+  }
+
   // Inbox
   async listInbox(): Promise<InboxItem[]> {
     const raw = await this.fetch<unknown>("/api/inbox");
@@ -4671,14 +4698,18 @@ export class ApiClient {
     });
   }
 
-  async putIssueViewPreference(data: {
-    scope_type: string;
-    scope_id?: string | null;
-    prefs: { hidden: string[]; order: string[] };
-  }): Promise<IssueViewPreference> {
+  async putIssueViewPreference(
+    data: {
+      scope_type: string;
+      scope_id?: string | null;
+      prefs: Record<string, unknown>;
+    },
+    workspaceSlug?: string,
+  ): Promise<IssueViewPreference> {
     const raw = await this.fetch<unknown>("/api/issue-view-preferences", {
       method: "PUT",
       body: JSON.stringify(data),
+      headers: workspaceHeader(workspaceSlug),
     });
     return parseWithFallback(raw, IssueViewPreferenceSchema, EMPTY_ISSUE_VIEW_PREFERENCE, {
       endpoint: "PUT /api/issue-view-preferences",

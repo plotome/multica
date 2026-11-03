@@ -246,23 +246,23 @@ export function SquadDetailPage({ squadId: explicitSquadId }: { squadId?: string
           segments={segments}
           leaf={
             <span className="truncate text-muted-foreground">
-               {explicitSquadId === undefined ? t(($) => $.detail.not_found) : t(($) => $.detail.load_failed)}
+              {explicitSquadId === undefined ? t(($) => $.detail.not_found) : t(($) => $.detail.load_failed)}
             </span>
           }
         >
           <CollectionPageState
             icon={FileQuestion}
-             title={explicitSquadId === undefined ? t(($) => $.detail.not_found) : t(($) => $.detail.load_failed)}
-             description={explicitSquadId === undefined ? t(($) => $.detail.not_found_description) : undefined}
+            title={explicitSquadId === undefined ? t(($) => $.detail.not_found) : t(($) => $.detail.load_failed)}
+            description={explicitSquadId === undefined ? t(($) => $.detail.not_found_description) : undefined}
             actions={
-               <>
-                 <AppLink href={p.squads()} className={buttonVariants({ variant: "outline", size: "sm" })}>
-                   {t(($) => $.detail.back_to_list)}
-                 </AppLink>
-                 {explicitSquadId !== undefined && validSquadId && (
-                   <Button type="button" variant="outline" onClick={() => void refetchSquad()}>{t(($) => $.detail.try_again)}</Button>
-                 )}
-               </>
+              <>
+                <AppLink href={p.squads()} className={buttonVariants({ variant: "outline", size: "sm" })}>
+                  {t(($) => $.detail.back_to_list)}
+                </AppLink>
+                {explicitSquadId !== undefined && validSquadId && (
+                  <Button type="button" variant="outline" onClick={() => void refetchSquad()}>{t(($) => $.detail.try_again)}</Button>
+                )}
+              </>
             }
           />
         </ObjectPage>

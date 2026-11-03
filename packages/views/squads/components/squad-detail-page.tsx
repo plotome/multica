@@ -23,14 +23,17 @@ import {
   ObjectSection,
   ObjectSectionAction,
   ObjectSectionCard,
+  ObjectSectionEmpty,
 } from "../../layout/object-page";
 import { CollectionPageState } from "../../layout/collection-page";
 import {
   Bot,
   ChevronDown,
   Crown,
+  FileQuestion,
   Globe,
   Link2,
+  ListTodo,
   Loader2,
   MoreHorizontal,
   Pencil,
@@ -40,7 +43,7 @@ import {
   UserPlus,
   Users,
 } from "@multica/ui/icons";
-import { Button } from "@multica/ui/components/ui/button";
+import { Button, buttonVariants } from "@multica/ui/components/ui/button";
 import { IconButton } from "@multica/ui/components/common/icon-button";
 import { Input } from "@multica/ui/components/ui/input";
 import { Label } from "@multica/ui/components/ui/label";
@@ -238,9 +241,30 @@ export function SquadDetailPage({ squadId: explicitSquadId }: { squadId?: string
   if (!squad) {
     if (squadError || !validSquadId) {
       return (
-        <ObjectPage layoutId={layoutId} segments={segments} leaf={null}>
-          <CollectionPageState icon={Users} title={explicitSquadId === undefined ? t(($) => $.detail.not_found) : t(($) => $.detail.load_failed)} />
-          {explicitSquadId !== undefined && validSquadId && <Button type="button" variant="outline" onClick={() => void refetchSquad()}>{t(($) => $.detail.try_again)}</Button>}
+        <ObjectPage
+          layoutId={layoutId}
+          segments={segments}
+          leaf={
+            <span className="truncate text-muted-foreground">
+              {explicitSquadId === undefined ? t(($) => $.detail.not_found) : t(($) => $.detail.load_failed)}
+            </span>
+          }
+        >
+          <CollectionPageState
+            icon={FileQuestion}
+            title={explicitSquadId === undefined ? t(($) => $.detail.not_found) : t(($) => $.detail.load_failed)}
+            description={explicitSquadId === undefined ? t(($) => $.detail.not_found_description) : undefined}
+            actions={
+              <>
+                <AppLink href={p.squads()} className={buttonVariants({ variant: "outline", size: "sm" })}>
+                  {t(($) => $.detail.back_to_list)}
+                </AppLink>
+                {explicitSquadId !== undefined && validSquadId && (
+                  <Button type="button" variant="outline" onClick={() => void refetchSquad()}>{t(($) => $.detail.try_again)}</Button>
+                )}
+              </>
+            }
+          />
         </ObjectPage>
       );
     }
@@ -686,7 +710,21 @@ function SquadMembersSection({
             );
           })}
         </ObjectSectionCard>
-      ) : null}
+      ) : (
+        <ObjectSectionEmpty
+          icon={Users}
+          title={t(($) => $.members_tab.empty_title)}
+          description={t(($) => $.members_tab.empty_description)}
+          action={
+            canManage ? (
+              <Button type="button" variant="outline" size="sm" onClick={onAddMemberClick}>
+                <Plus aria-hidden="true" />
+                {t(($) => $.members_tab.add_member_button)}
+              </Button>
+            ) : null
+          }
+        />
+      )}
     </ObjectSection>
   );
 }
@@ -832,7 +870,7 @@ function SquadRecentWorkSection({
           ))}
         </ObjectSectionCard>
       ) : (
-        <p className="text-caption text-muted-foreground">{t(($) => $.detail.recent_work_empty)}</p>
+        <ObjectSectionEmpty icon={ListTodo} description={t(($) => $.detail.recent_work_empty)} />
       )}
     </ObjectSection>
   );

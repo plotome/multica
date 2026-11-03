@@ -13,61 +13,63 @@ import (
 // installer and version migration in control of that directory. No writes are
 // made through user-skill symlinks, and no-op refreshes preserve visible paths,
 // file identity and timestamps. The caller holds the conversation lease.
-func hydratePersistentCodexSkills(home string, workspace []SkillContextForEnv, disabled []RuntimeSkillRefForEnv, logger *slog.Logger) error {
+func hydratePersistentCodexSkills(home string, workspace []SkillContextForEnv, disabled []RuntimeSkillRefForEnv, logger *slog.Logger) ([]string, error) {
 	stage, err := os.MkdirTemp(home, ".skills-prepare-")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer os.RemoveAll(stage)
 	if err := seedUserCodexSkills(stage, workspace, logger); err != nil {
-		return err
+		return nil, err
 	}
 	wanted := filepath.Join(stage, "skills")
-	if err := writeSkillFiles(wanted, workspace, nil); err != nil {
-		return err
+	preparedSkillNames, err := writeSkillFilesWithNames(wanted, workspace, nil)
+	if err != nil {
+		return nil, err
 	}
 	actual, err := privateCodexChild(home, "skills")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	entries, err := os.ReadDir(wanted)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	keep := map[string]bool{".system": true}
 	for _, entry := range entries {
 		name := entry.Name()
 		if name == ".system" {
-			return fmt.Errorf("workspace skill cannot own Codex .system")
+			return nil, fmt.Errorf("workspace skill cannot own Codex .system")
 		}
 		keep[name] = true
 		src, dst := filepath.Join(wanted, name), filepath.Join(actual, name)
 		equal, err := equalCodexSkillEntry(src, dst)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if equal {
 			continue
 		}
 		if err := os.RemoveAll(dst); err != nil {
-			return err
+			return nil, err
 		}
 		if err := os.Rename(src, dst); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	previous, err := os.ReadDir(actual)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, entry := range previous {
 		if !keep[entry.Name()] {
 			if err := os.RemoveAll(filepath.Join(actual, entry.Name())); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
-	return ensureCodexDisabledSkillsConfig(filepath.Join(home, "config.toml"), home, disabled, workspace)
+	preparedTask := ApplyPreparedSkillNames(TaskContextForEnv{AgentSkills: workspace}, preparedSkillNames)
+	return preparedSkillNames, ensureCodexDisabledSkillsConfig(filepath.Join(home, "config.toml"), home, disabled, preparedTask.AgentSkills)
 }
 
 func equalCodexSkillEntry(a, b string) (bool, error) {

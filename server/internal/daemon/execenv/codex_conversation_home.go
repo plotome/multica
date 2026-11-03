@@ -256,11 +256,11 @@ func (l *CodexConversationHomeLease) StartFreshGeneration() error {
 
 // PrepareFreshCodexConversationHome refreshes only the new home, without
 // replaying the worktree or mutating the previous generation's databases.
-func PrepareFreshCodexConversationHome(home string, opts CodexHomeOptions, task TaskContextForEnv, logger *slog.Logger) error {
+func PrepareFreshCodexConversationHome(home string, opts CodexHomeOptions, task TaskContextForEnv, logger *slog.Logger) ([]string, error) {
 	opts.ConversationHome = true
 	opts.ResumeSessionID = ""
 	if err := prepareCodexHomeWithOpts(home, opts, logger); err != nil {
-		return err
+		return nil, err
 	}
 	return hydratePersistentCodexSkills(home, task.AgentSkills, task.DisabledRuntimeSkills, logger)
 }

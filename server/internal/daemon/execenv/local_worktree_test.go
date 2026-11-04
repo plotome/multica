@@ -216,6 +216,79 @@ func TestPersistentLocalWorktreeReusesPhysicalCheckoutAndRefreshesUserState(t *t
 	removePersistentForTest(t, second)
 }
 
+func TestPersistentLocalWorktreeKeepsCommittedTurnLeftoversOffLaterTurns(t *testing.T) {
+	repo := newTestRepo(t)
+	params := persistentParamsForTest(t, repo, t.TempDir(), testBranchOwner.AgentID)
+	first, err := PrepareLocalWorktree(params, worktreeTestLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(first.Path, "delivered.txt"), "delivered\n")
+	gitRun(t, first.Path, "add", "delivered.txt")
+	gitRun(t, first.Path, "commit", "-m", "deliver intended file")
+	writeFile(t, filepath.Join(first.Path, "scratch.txt"), "leftover\n")
+	outcome, err := first.Finalize(worktreeTestLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLeftovers(t, repo, outcome, first.Branch, map[string]string{"scratch.txt": "leftover"})
+	if dirty, err := worktreeIsDirty(first.Path); err != nil || dirty {
+		t.Fatalf("persistent checkout remained dirty after saving leftovers: dirty=%v err=%v", dirty, err)
+	}
+	params.EnvRoot = t.TempDir()
+	params.TaskID = "11112222-3333-4444-5555-999900001111"
+	second, err := PrepareLocalWorktree(params, worktreeTestLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(second.Path, "scratch.txt")); !os.IsNotExist(err) {
+		t.Fatalf("leftover reappeared on the next turn: %v", err)
+	}
+	if _, err := second.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatal(err)
+	}
+	removePersistentForTest(t, second)
+}
+
+func TestPersistentLocalWorktreeRefusesInterruptedLeftoverCleanup(t *testing.T) {
+	repo := newTestRepo(t)
+	params := persistentParamsForTest(t, repo, t.TempDir(), testBranchOwner.AgentID)
+	first, err := PrepareLocalWorktree(params, worktreeTestLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(first.Path, "delivered.txt"), "delivered\n")
+	gitRun(t, first.Path, "add", "delivered.txt")
+	gitRun(t, first.Path, "commit", "-m", "deliver intended file")
+	writeFile(t, filepath.Join(first.Path, "scratch.txt"), "leftover\n")
+	if err := first.markPendingLeftoverCleanup(); err != nil {
+		t.Fatal(err)
+	}
+	tip := gitRun(t, first.Path, "rev-parse", "HEAD")
+	ref, err := first.saveLeftovers(tip, worktreeTestLogger())
+	if err != nil || ref == "" {
+		t.Fatalf("save leftovers: ref=%q err=%v", ref, err)
+	}
+	params.EnvRoot = t.TempDir()
+	params.TaskID = "11112222-3333-4444-5555-999900001111"
+	if _, err := PrepareLocalWorktree(params, worktreeTestLogger()); err == nil || !strings.Contains(err.Error(), "interrupted leftover cleanup") {
+		t.Fatalf("next turn accepted unsafe checkout: %v", err)
+	}
+	record, err := readPersistentLocalWorktreeRecord(first.PersistentEntryRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RemovePersistentLocalWorktree(record, worktreeTestLogger()); err == nil || !strings.Contains(err.Error(), "interrupted leftover cleanup") {
+		t.Fatalf("cleanup committed pending leftovers: %v", err)
+	}
+	if got := gitRun(t, repo, "show", ref+":scratch.txt"); got != "leftover" {
+		t.Fatalf("saved ref lost leftover: %q", got)
+	}
+	if got := gitRun(t, repo, "ls-tree", "-r", "--name-only", first.Branch); strings.Contains(got, "scratch.txt") {
+		t.Fatalf("branch gained leftover after crash recovery: %s", got)
+	}
+}
+
 func TestPersistentLocalWorktreeChangesProjectDirectory(t *testing.T) {
 	repo := newTestRepo(t)
 	writeFile(t, filepath.Join(repo, "research", "README.md"), "research")
@@ -2590,9 +2663,9 @@ func TestIsolatedPrepareCarriesTheStateFinalizeNeeds(t *testing.T) {
 	}
 	// The proofs Finalize makes all hang off state that crosses as JSON —
 	// createdBranch among them, without which a read-only turn keeps its branch.
-	if !wt.tracksState || wt.userState == "" || wt.owner != testBranchOwner || !wt.createdBranch {
-		t.Fatalf("state lost crossing the helper boundary: tracksState=%v userState=%q owner=%+v createdBranch=%v",
-			wt.tracksState, wt.userState, wt.owner, wt.createdBranch)
+	if !wt.tracksState || wt.userState == "" || wt.owner != testBranchOwner || !wt.createdBranch || wt.taskID != turnOneTask {
+		t.Fatalf("state lost crossing the helper boundary: tracksState=%v userState=%q owner=%+v createdBranch=%v taskID=%q",
+			wt.tracksState, wt.userState, wt.owner, wt.createdBranch, wt.taskID)
 	}
 
 	writeFile(t, filepath.Join(wt.WorkDir, "agent.txt"), "work from turn one\n")

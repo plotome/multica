@@ -25,17 +25,20 @@ const (
 // unregister the daemon-owned checkout without trusting paths discovered from
 // the filesystem.
 type PersistentLocalWorktreeRecord struct {
-	Version          int       `json:"version"`
-	WorkspaceID      string    `json:"workspace_id"`
-	AgentID          string    `json:"agent_id"`
-	ConversationID   string    `json:"conversation_id"`
-	ConversationKind string    `json:"conversation_kind"`
-	GitRoot          string    `json:"git_root"`
-	WorktreePath     string    `json:"worktree_path"`
-	WorkDir          string    `json:"work_dir"`
-	Branch           string    `json:"branch"`
-	Provider         string    `json:"provider"`
-	LastUsedAt       time.Time `json:"last_used_at"`
+	Version          int    `json:"version"`
+	WorkspaceID      string `json:"workspace_id"`
+	AgentID          string `json:"agent_id"`
+	ConversationID   string `json:"conversation_id"`
+	ConversationKind string `json:"conversation_kind"`
+	GitRoot          string `json:"git_root"`
+	WorktreePath     string `json:"worktree_path"`
+	WorkDir          string `json:"work_dir"`
+	Branch           string `json:"branch"`
+	Provider         string `json:"provider"`
+	// PendingLeftoverCleanup prevents crash recovery from committing changes
+	// that a prior turn chose to keep off the branch.
+	PendingLeftoverCleanup bool      `json:"pending_leftover_cleanup,omitempty"`
+	LastUsedAt             time.Time `json:"last_used_at"`
 
 	EntryRoot string `json:"-"`
 }
@@ -154,6 +157,15 @@ func (w *LocalWorktree) persistRecord() error {
 	})
 }
 
+func (w *LocalWorktree) markPendingLeftoverCleanup() error {
+	record, err := readPersistentLocalWorktreeRecord(w.PersistentEntryRoot)
+	if err != nil {
+		return err
+	}
+	record.PendingLeftoverCleanup = true
+	return writePersistentLocalWorktreeRecord(w.PersistentEntryRoot, record)
+}
+
 // Missing subdirectories can be materialized by the user-state replay. Check
 // their nearest existing ancestor too, so a symlink cannot redirect cleanup or
 // injection outside this checkout.
@@ -260,6 +272,9 @@ func RemovePersistentLocalWorktree(record PersistentLocalWorktreeRecord, logger 
 	if dirty, err := worktreeIsDirty(current.WorktreePath); err != nil {
 		return err
 	} else if dirty {
+		if current.PendingLeftoverCleanup {
+			return fmt.Errorf("persistent worktree %s has interrupted leftover cleanup; inspect its saved refs before removal", current.WorktreePath)
+		}
 		if _, err := commitEverything(current.WorktreePath, "chore(agent): recovered changes before persistent worktree cleanup", false); err != nil {
 			return fmt.Errorf("checkpoint persistent local worktree before cleanup: %w", err)
 		}

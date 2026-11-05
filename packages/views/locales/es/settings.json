@@ -1247,6 +1247,8 @@
     "updates": {
       "title": "Actualizaciones",
       "current_version": "Versión actual",
+      "manual_updates_title": "Actualizaciones manuales",
+      "manual_updates_description": "Instala un paquete verificado de la aplicación de escritorio durante una ventana de mantenimiento. Tu espacio de trabajo y configuración se conservan.",
       "automatic_updates_title": "Actualizaciones automáticas en segundo plano",
       "automatic_updates_description": "Comprueba poco después de iniciar y cada hora, y descarga las actualizaciones disponibles en segundo plano.",
       "automatic_updates_save_failed": "Error al guardar la configuración de actualizaciones automáticas",

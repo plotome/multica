@@ -1047,7 +1047,22 @@
     "section_owner": "Propietario",
     "section_model": "Modelo"
   },
-  "actions": {},
+  "actions": {
+    "selected_one": "{{count}} seleccionado",
+    "selected_other": "{{count}} seleccionados",
+    "clear_selection": "Borrar selección"
+  },
+  "approval": {
+    "title": "Acceso a aplicaciones",
+    "once": "Permitir una vez",
+    "session": "Permitir durante esta sesión",
+    "always": "Permitir siempre",
+    "decline": "Rechazar",
+    "cancel": "Cancelar solicitud",
+    "details": "Solicitud original",
+    "load_error": "No se pudieron cargar las aprobaciones de aplicaciones. Vuelve a abrir la ejecución para intentarlo de nuevo.",
+    "response_error": "No se pudo guardar la respuesta. Actualiza la solicitud e inténtalo de nuevo."
+  },
   "sections": {
     "runs_count_one": "{{count}} ejecución",
     "runs_count_other": "{{count}} ejecuciones",

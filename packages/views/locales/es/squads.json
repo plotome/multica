@@ -120,7 +120,13 @@
     "all": "Todos los squads"
   },
   "toolbar": {},
+  "inspector": {
+    "details_section": "Detalles",
+    "archive_button": "Archivar"
+  },
   "detail": {
+    "load_failed": "No se pudo cargar este squad",
+    "try_again": "Reintentar",
     "assign_work": "Asignar trabajo",
     "copy_link": "Copiar enlace",
     "link_copied": "Enlace copiado",

@@ -146,6 +146,7 @@ var concurrentIndexCleanups = map[string]string{
 	"611_wecom_install_session_agent_pending_idx":               "idx_wecom_install_session_agent_pending",
 	"610_wecom_install_session_request_idx":                     "idx_wecom_install_session_request",
 	"609_wecom_install_session_due_idx":                         "idx_wecom_install_session_due",
+	"620_skill_version_index":                                   "idx_skill_version_skill_version",
 	"563_search_index_change_changed_at_index":                  "idx_search_index_change_changed_at",
 	"562_search_index_change_workspace_index":                   "idx_search_index_change_workspace_xid",
 	"552_agent_task_history_page_index":                         "idx_agent_task_queue_history_page",

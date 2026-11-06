@@ -78,6 +78,35 @@ func persistentLocalWorktreePath(entryRoot string) string {
 	return filepath.Join(entryRoot, localWorktreeDirName)
 }
 
+// A killed preparation helper cannot run rollback. Without a published state
+// record we cannot prove that a checkout is disposable, even if Git still has
+// its "initializing" lock. Preserve it, including its branch and dirty files,
+// and repair Git's backlink before allowing a fresh checkout at the stable key.
+// Caller holds the repository lock. Hidden recovery entries are excluded from GC.
+func preserveInterruptedPersistentWorktree(gitRoot, entryRoot string, logger *slog.Logger) error {
+	archive, err := os.MkdirTemp(filepath.Dir(entryRoot), ".interrupted-"+filepath.Base(entryRoot)+"-")
+	if err != nil {
+		return err
+	}
+	savedEntry := filepath.Join(archive, "entry")
+	if err := os.Rename(entryRoot, savedEntry); err != nil {
+		_ = os.Remove(archive)
+		return fmt.Errorf("preserve interrupted persistent worktree: %w", err)
+	}
+	savedPath := persistentLocalWorktreePath(savedEntry)
+	if _, err := os.Lstat(filepath.Join(savedPath, ".git")); err == nil {
+		if out, err := runGit(gitRoot, "worktree", "repair", savedPath); err != nil {
+			return fmt.Errorf("repair interrupted worktree saved at %s: %s: %w", savedPath, strings.TrimSpace(out), err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect interrupted worktree saved at %s: %w", savedPath, err)
+	}
+	if logger != nil {
+		logger.Warn("execenv: preserved persistent worktree without state; rebuilding checkout", "recovery_path", savedPath)
+	}
+	return nil
+}
+
 func readPersistentLocalWorktreeRecord(entryRoot string) (PersistentLocalWorktreeRecord, error) {
 	data, err := os.ReadFile(filepath.Join(entryRoot, persistentLocalWorktreeStateFile))
 	if err != nil {

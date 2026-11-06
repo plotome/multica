@@ -388,7 +388,18 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 	}
 	defer unlock()
 
+	if persistent {
+		if _, err := os.Lstat(worktreePath); err == nil {
+			if _, err := os.Lstat(filepath.Join(persistentEntryRoot, persistentLocalWorktreeStateFile)); errors.Is(err, os.ErrNotExist) {
+				if err := preserveInterruptedPersistentWorktree(gitRoot, persistentEntryRoot, logger); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+
 	existingPersistent := false
+	existingBranch := ""
 	var existingUnmerged []string
 	if _, statErr := os.Stat(worktreePath); statErr == nil && persistent {
 		record, recordErr := readPersistentLocalWorktreeRecord(persistentEntryRoot)
@@ -432,6 +443,7 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 			}
 		}
 		existingPersistent = true
+		existingBranch = record.Branch
 	} else if statErr == nil {
 		// Prepare wipes and recreates envRoot, so an existing worktree path
 		// means a stale registration in the user's repo pointing here. Remove
@@ -488,6 +500,16 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 	}
 
 	plan := resolveTaskBranch(gitRoot, params, headSHA, logger)
+	if existingPersistent && plan.name != existingBranch {
+		// Recovery can leave the preferred branch in a preserved checkout.
+		// Continue the physical checkout's recorded branch, but only after the
+		// normal ownership/checkpoint validation has proved it belongs here.
+		var owned bool
+		plan, owned = planForConversationBranch(gitRoot, existingBranch, headSHA, params.owner(), logger)
+		if !owned {
+			return nil, fmt.Errorf("execenv: persistent branch %q is not owned by this conversation", existingBranch)
+		}
+	}
 	actualBranch := plan.name
 	createdBranch := false
 	if existingPersistent {
@@ -531,9 +553,10 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 		priorState:                 plan.priorState,
 		owner:                      plan.owner,
 		taskID:                     params.TaskID,
-		// A branch a sibling task forked because the conversation's own branch
-		// was busy is delivered once and never continued, so it records nothing.
-		tracksState: plan.tracksState && actualBranch == plan.name,
+		// Disposable fallback branches are delivered once. A persistent
+		// checkout also records ownership for its fallback so later turns can
+		// validate and continue the branch named by its physical record.
+		tracksState: plan.tracksState && (actualBranch == plan.name || persistent),
 	}
 
 	// Tear the worktree back down on every failure below. A half-replayed tree

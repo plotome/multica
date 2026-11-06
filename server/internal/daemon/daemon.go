@@ -86,8 +86,8 @@ const (
 	taskSlotCapacityBackoff  = 5 * time.Second
 	repoCheckoutModeEnv      = "MULTICA_REPO_CHECKOUT_MODE"
 	repoCheckoutModeIsolated = "isolated"
-	// defaultTaskPrepareTimeout is a hard liveness bound for everything after
-	// claim and before StartTask succeeds: runtime resolution, skill bundles,
+	// defaultTaskPrepareTimeout is a hard liveness bound after the local
+	// worktree queue and before StartTask succeeds: runtime resolution, skill bundles,
 	// execution-environment setup, and the StartTask request itself. It is
 	// intentionally independent from AgentTimeout, which only governs the
 	// provider process after the task reaches running.
@@ -746,7 +746,7 @@ type Daemon struct {
 	// executionEnvironmentCommand resolves the killable helper used for
 	// Prepare/Reuse. New always sets it; nil keeps focused unit tests in-process.
 	executionEnvironmentCommand executionEnvironmentCommand
-	// taskPrepareTimeout is the dispatched -> running hard deadline. New sets
+	// taskPrepareTimeout is the preparation deadline, excluding snapshot queue time. New sets
 	// the production default; zero-valued test daemons fall back to the same
 	// default in effectiveTaskPrepareTimeout.
 	taskPrepareTimeout time.Duration
@@ -7856,6 +7856,57 @@ func qualifyTaskModel(
 	return qualified
 }
 
+// acquireWorktreePreparationQueue keeps repository snapshot/checkouts serial,
+// without charging sibling tasks' queue time to the preparation deadline.
+// Cancellation and lease renewal remain active throughout the wait.
+func (d *Daemon) acquireWorktreePreparationQueue(ctx context.Context, task Task, localAssignment *localDirectoryAssignment, taskLog *slog.Logger) (func(), error) {
+	if !localAssignment.UsesWorktree() {
+		return func() {}, nil
+	}
+	stopLease := d.startTaskPrepareLeaseExtender(ctx, task, taskLog)
+	defer stopLease()
+	waitCtx, waitCancel := context.WithCancel(ctx)
+	defer waitCancel()
+	pollInterval := d.cancelPollInterval
+	if pollInterval == 0 {
+		pollInterval = 5 * time.Second
+	}
+	// LocalPathLocker invokes onWait synchronously, in this goroutine,
+	// at most once per Acquire — see the in-place call site.
+	waitCounted := false
+	release, lockErr := d.localPathLocks.Acquire(waitCtx, localAssignment.RealPath, task.ID, func(holder string) {
+		d.resourceWaitTasks.Add(1)
+		waitCounted = true
+		reason := fmt.Sprintf("local_directory %s", localAssignment.AbsPath)
+		if holder != "" {
+			reason = fmt.Sprintf("%s (held by task %s)", reason, shortID(holder))
+		}
+		taskLog.Info("local_directory: worktree snapshot waiting for holder",
+			"holder", holder)
+		if waitErr := d.client.MarkTaskWaitingLocalDirectory(waitCtx, task.ID, reason); waitErr != nil {
+			// Non-fatal: the wait still happens, the UI just won't
+			// show the explicit "waiting" badge.
+			taskLog.Warn("local_directory: mark waiting status failed", "error", waitErr)
+		}
+		cancelled := d.watchTaskCancellation(waitCtx, task.ID, pollInterval, taskLog)
+		go func() {
+			select {
+			case <-cancelled:
+				waitCancel()
+			case <-waitCtx.Done():
+			}
+		}()
+	})
+	if waitCounted {
+		d.resourceWaitTasks.Add(-1)
+	}
+	if lockErr != nil {
+		return nil, fmt.Errorf("local_directory worktree: wait for a consistent snapshot of %s: %w",
+			localAssignment.AbsPath, lockErr)
+	}
+	return release, nil
+}
+
 func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot int, taskLog *slog.Logger) (taskResult TaskResult, returnErr error) {
 	phaseRecorder := taskPhaseRecorderFromContext(ctx)
 	phaseRecorder.Mark(taskPhasePrepareStarted)
@@ -7875,6 +7926,15 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.WorkspaceID == "" {
 		return TaskResult{}, fmt.Errorf("refusing to spawn agent: task has no workspace_id (task_id=%s)", task.ID)
 	}
+
+	localAssignment, _ := localDirectoryAssignmentForTask(task, d.cfg.DaemonID)
+	// Queue before starting the hard preparation budget. Sibling checkouts and
+	// in-place writers can take longer than that budget without being wedged.
+	releasePreparationQueue, queueErr := d.acquireWorktreePreparationQueue(ctx, task, localAssignment, taskLog)
+	if queueErr != nil {
+		return TaskResult{}, queueErr
+	}
+	defer releasePreparationQueue()
 
 	prepareTimeout := d.effectiveTaskPrepareTimeout()
 	prepareCtx, cancelPrepare := context.WithTimeoutCause(ctx, prepareTimeout, errTaskPrepareTimeout)
@@ -8100,10 +8160,6 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if provider == "openclaw" {
 		openclawBin = entry.Path
 	}
-	// Resolve any local_directory assignment again here so runTask can plumb
-	// LocalWorkDir into execenv. handleTask already validated + locked the
-	// path for worker tasks; leader tasks intentionally skip the assignment.
-	localAssignment, _ := localDirectoryAssignmentForTask(task, d.cfg.DaemonID)
 	// Reuse intentionally skipped for local_directory tasks: the prior
 	// WorkDir is the user's own path (always present) but the reuse path
 	// loses the envRoot association the GC loop needs, and re-running
@@ -8434,68 +8490,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			if d.cfg.PersistentLocalWorktrees {
 				prepParams.LocalWorktree.PersistentRoot = d.cfg.WorkspacesRoot
 			}
-			// Take the per-path mutex for the snapshot alone, then hand it
-			// straight back — long enough to read a consistent tree, short
-			// enough that worktree tasks still overlap for the run itself.
-			//
-			// A worktree task skips this lock for its execution, but the
-			// snapshot is the one moment it READS the user's directory, and the
-			// same real path can be attached to another project as an in_place
-			// resource (each project may attach it once, so several can).
-			// Snapshotting underneath a running in_place task would capture a
-			// half-written tree plus that task's in-flight sidecars.
-			//
-			// The wait gets the same visibility plumbing as the in-place
-			// acquire in acquireLocalDirectoryLockIfNeeded, because the holder
-			// can be an in-place task that runs for hours: without the status
-			// update the user sees a bare "preparing" with no hint the task is
-			// queued behind the directory, and without the poller a task the
-			// user cancels keeps its daemon slot pinned until the prepare
-			// timeout — the run-phase cancellation watcher only starts after
-			// launch. The prepare-lease extender is already running for this
-			// whole phase, so only status, accounting, and cancellation are
-			// mirrored here.
-			waitCtx, waitCancel := context.WithCancel(prepareCtx)
-			defer waitCancel()
-			pollInterval := d.cancelPollInterval
-			if pollInterval == 0 {
-				pollInterval = 5 * time.Second
-			}
-			// LocalPathLocker invokes onWait synchronously, in this goroutine,
-			// at most once per Acquire — see the in-place call site.
-			waitCounted := false
-			release, lockErr := d.localPathLocks.Acquire(waitCtx, localAssignment.RealPath, task.ID, func(holder string) {
-				d.resourceWaitTasks.Add(1)
-				waitCounted = true
-				reason := fmt.Sprintf("local_directory %s", localAssignment.AbsPath)
-				if holder != "" {
-					reason = fmt.Sprintf("%s (held by task %s)", reason, shortID(holder))
-				}
-				taskLog.Info("local_directory: worktree snapshot waiting for holder",
-					"holder", holder)
-				if waitErr := d.client.MarkTaskWaitingLocalDirectory(waitCtx, task.ID, reason); waitErr != nil {
-					// Non-fatal: the wait still happens, the UI just won't
-					// show the explicit "waiting" badge.
-					taskLog.Warn("local_directory: mark waiting status failed", "error", waitErr)
-				}
-				cancelled := d.watchTaskCancellation(waitCtx, task.ID, pollInterval, taskLog)
-				go func() {
-					select {
-					case <-cancelled:
-						waitCancel()
-					case <-waitCtx.Done():
-					}
-				}()
-			})
-			if waitCounted {
-				d.resourceWaitTasks.Add(-1)
-			}
-			if lockErr != nil {
-				return TaskResult{}, fmt.Errorf("local_directory worktree: wait for a consistent snapshot of %s: %w",
-					localAssignment.AbsPath, lockErr)
-			}
 			env, err = d.prepareExecutionEnvironment(prepareCtx, prepParams)
-			release()
+			releasePreparationQueue()
 			if err != nil {
 				return TaskResult{}, asEnvironmentSetupFailure(fmt.Errorf("prepare execution environment: %w", err))
 			}
@@ -8509,6 +8505,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			}
 		}
 	}
+	releasePreparationQueue()
 	phaseRecorder.Mark(taskPhaseEnvironmentReady)
 	// Belt-and-suspenders: also mark whatever root we ended up with, in case
 	// future changes diverge from ResolveRootDir.

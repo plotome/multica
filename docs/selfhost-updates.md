@@ -82,6 +82,16 @@ Persistent worktrees are enabled by default in this fork. An explicit
 acceptance; report such an override before deployment rather than silently
 changing the host's configuration.
 
+Local worktree preparation queues behind other snapshots or in-place writers
+before starting its preparation deadline. Cancellation and prepare leases stay
+active while queued; agent execution releases the snapshot queue.
+If preparation is killed before publishing `state.json`, the next attempt moves
+the unrecorded checkout to a hidden `.interrupted-<key>-*/entry` directory under
+the persistent worktree registry and repairs its Git registration, then creates
+a fresh checkout. Recovery directories retain commits and dirty files and are
+excluded from automatic GC; inspect them before manually removing them. Invalid
+published state still fails closed rather than being treated as an interruption.
+
 ## Retiring or replacing a patch
 
 Keep the old commit in history. Use an explicit revert or replacement commit,

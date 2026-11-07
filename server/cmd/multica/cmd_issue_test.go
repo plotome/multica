@@ -2060,6 +2060,7 @@ func TestResolveTaskRunID(t *testing.T) {
 }
 
 func TestRunIssueRunMessagesResolvesShortTaskPrefix(t *testing.T) {
+	t.Chdir(t.TempDir())
 	issueID := "1881a167-4bb6-4602-944b-f40ce4192fe6"
 	taskID := "abcd1234-0000-0000-0000-000000000000"
 	var messagePath string

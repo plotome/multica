@@ -1220,3 +1220,24 @@ The immutable `runtime_type` selects model discovery, skills paths, and launch b
 the server derives `protocol_family` (`pi` for `omp`). Custom command/path overrides and
 fixed arguments still apply, and the runtime retains its custom-profile provenance.
 Existing profiles and the legacy `--protocol-family` flag retain their original target.
+
+### Read one run's persistence evidence
+
+`multica issue run-diagnostics <run-id> [--issue <issue-id-or-key>] --output json`
+reads `GET /api/tasks/{taskId}/diagnostics`. Short run IDs use the same scoped
+resolver as `run-messages`. The endpoint shares transcript workspace and chat
+owner checks. It returns a versioned, payload-free summary: the stored session
+pointer, `session_rollout_missing`, message type counts, and the first persisted
+model/tool activity sequence and timestamp. No text, thinking, tool arguments,
+tool output, or raw failure error is returned.
+
+`model_activity=observed` means a nonempty text/thinking event or a tool event is
+persisted. `persistence=model_activity_persisted` confirms that positive evidence;
+`messages_present` alone may be only status/error history. `unknown` means the
+stored evidence cannot answer the question, including historical empty failed
+runs. Neither an empty message array, a null session pointer, a failure category,
+nor `started_at` proves that the model never started. This endpoint does not
+certify a complete transcript or consult local rollout files/daemon logs. The
+rollout-missing flag is reported independently even when messages are present.
+Older servers lacking the endpoint and unsupported/malformed responses fail
+explicitly; the CLI does not fall back to declaring a no-dialogue run.

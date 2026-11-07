@@ -4,7 +4,9 @@
     {
       "id": "cli-open-list-and-issue-cancel",
       "introduced_by": "6ab3df118d7f08d09e36dad14020a97662033b4a",
-      "required_files": ["server/cmd/multica/cmd_issue_cli_gaps_test.go"],
+      "required_files": [
+        "server/cmd/multica/cmd_issue_cli_gaps_test.go"
+      ],
       "required_tests": [
         "TestRunIssueCancelTaskByIssue",
         "TestRunIssueListOpenFiltersByUnfinishedCategory"
@@ -13,20 +15,31 @@
     {
       "id": "squad-detail-route-id",
       "introduced_by": "b0842de511a4d63c256187fe11e9167ad8d05070",
-      "required_files": ["packages/views/squads/components/squad-detail-page.tsx", "apps/desktop/src/renderer/src/pages/squad-detail-page.test.tsx"],
+      "required_files": [
+        "packages/views/squads/components/squad-detail-page.tsx",
+        "apps/desktop/src/renderer/src/pages/squad-detail-page.test.tsx"
+      ],
       "required_tests": []
     },
     {
       "id": "bounded-api-requests",
       "introduced_by": "b0842de511a4d63c256187fe11e9167ad8d05070",
-      "required_files": ["packages/core/api/client.ts", "packages/core/api/client.test.ts"],
+      "required_files": [
+        "packages/core/api/client.ts",
+        "packages/core/api/client.test.ts"
+      ],
       "required_tests": []
     },
     {
       "id": "host-codex-runtime-config",
       "introduced_by": "58130e2f98c9b5175e0523c46a0c78584a5665e0",
-      "required_files": ["server/internal/daemon/execenv/codex_runtime_config.go", "docs/runtime-application-approval.md"],
-      "absent_files": ["server/internal/daemon/execenv/runtime_manifest.go"],
+      "required_files": [
+        "server/internal/daemon/execenv/codex_runtime_config.go",
+        "docs/runtime-application-approval.md"
+      ],
+      "absent_files": [
+        "server/internal/daemon/execenv/runtime_manifest.go"
+      ],
       "required_tests": [
         "TestCodexRuntimeConfigValidation",
         "TestCodexRuntimeConfigFileTrust",
@@ -39,7 +52,11 @@
     {
       "id": "device-owner-application-approvals",
       "introduced_by": "58130e2f98c9b5175e0523c46a0c78584a5665e0",
-      "required_files": ["server/internal/daemon/task_elicitation.go", "server/pkg/agent/codex_elicitation.go", "docs/runtime-application-approval.md"],
+      "required_files": [
+        "server/internal/daemon/task_elicitation.go",
+        "server/pkg/agent/codex_elicitation.go",
+        "docs/runtime-application-approval.md"
+      ],
       "required_tests": [
         "TestTaskElicitationNeverPollsOrCancelsDeferredRecord",
         "TestCodexElicitationHumanResponseAndCancellation",
@@ -55,7 +72,9 @@
     {
       "id": "persistent-conversation-worktrees",
       "introduced_by": "4eadd28b3c588d38ebe8d83820b1ec17fa151a79",
-      "required_files": ["server/internal/daemon/execenv/persistent_local_worktree.go"],
+      "required_files": [
+        "server/internal/daemon/execenv/persistent_local_worktree.go"
+      ],
       "required_tests": [
         "TestPersistentLocalWorktreeConfig",
         "TestPersistentLocalWorktreeRecoversMissingState",
@@ -75,7 +94,9 @@
     {
       "id": "per-task-codex-processes",
       "introduced_by": "387032948d8aa1ed4387bf2260dd51da1394d32c",
-      "required_files": ["server/pkg/agent/codex.go"],
+      "required_files": [
+        "server/pkg/agent/codex.go"
+      ],
       "absent_files": [
         "server/internal/daemon/warm_pool.go",
         "server/internal/daemon/warm_backend.go",
@@ -123,7 +144,9 @@
     {
       "id": "codex-hook-trust-rehome",
       "introduced_by": "e556eb5c7de4b2e3fb51873241f453c425e1ee83",
-      "required_files": ["server/internal/daemon/execenv/codex_hook_trust.go"],
+      "required_files": [
+        "server/internal/daemon/execenv/codex_hook_trust.go"
+      ],
       "required_tests": [
         "TestRehomeCodexHookTrust",
         "TestRehomeCodexHookTrustSymlinkedHomes",
@@ -149,6 +172,21 @@
       ],
       "required_tests": [
         "TestVersionJSONIncludesExactBuildCommit"
+      ]
+    },
+    {
+      "id": "run-persistence-diagnostics",
+      "introduced_by": "c150ba502114b099807172d078e866fc02a77fb4",
+      "required_files": [
+        "server/internal/handler/task_run_diagnostics.go",
+        "server/pkg/protocol/task_diagnostics.go",
+        "server/cmd/multica/cmd_issue_run_diagnostics.go"
+      ],
+      "required_tests": [
+        "TestTaskRunDiagnosticsEmptyFailedHistoryIsUnknown",
+        "TestTaskRunDiagnosticsReportsActivityWithoutPayloads",
+        "TestTaskRunDiagnosticsSharesTranscriptAccess",
+        "TestIssueRunDiagnosticsResolvesScopedRunAndRejectsUnsupportedResponses"
       ]
     }
   ]

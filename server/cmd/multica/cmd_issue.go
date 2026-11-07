@@ -617,6 +617,7 @@ func init() {
 	issueCmd.AddCommand(issueSubscriberCmd)
 	issueCmd.AddCommand(issueRunsCmd)
 	issueCmd.AddCommand(issueRunMessagesCmd)
+	issueCmd.AddCommand(issueRunDiagnosticsCmd)
 	issueCmd.AddCommand(issueUsageCmd)
 	issueCmd.AddCommand(issueRerunCmd)
 	issueCmd.AddCommand(issueRerunTaskCmd)
@@ -755,6 +756,9 @@ func init() {
 	// issue cancel-task
 	issueCancelTaskCmd.Flags().String("output", "json", "Output format: table or json")
 	issueCancelTaskCmd.Flags().String("issue", "", "Issue ID/key to scope short run ID prefix resolution")
+	// issue run-diagnostics
+	issueRunDiagnosticsCmd.Flags().String("output", "json", "Output format: table or json")
+	issueRunDiagnosticsCmd.Flags().String("issue", "", "Issue ID/key to scope short run ID prefix resolution")
 	// issue run-messages
 	issueRunMessagesCmd.Flags().String("output", "json", "Output format: table or json")
 	issueRunMessagesCmd.Flags().Int("since", 0, "Only return messages after this sequence number")

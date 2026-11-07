@@ -11,6 +11,7 @@ import (
 )
 
 func TestIssueRunDiagnosticsResolvesScopedRunAndRejectsUnsupportedResponses(t *testing.T) {
+	t.Chdir(t.TempDir())
 	const issueID = "12345678-1234-4234-8234-123456789abc"
 	const taskID = "abcdef12-1234-4234-8234-123456789abc"
 	valid := `{"version":1,"task_id":"` + taskID + `","status":"failed","model_activity":"unknown","persistence":"unknown","messages":[],"session_id":null,"session_rollout_missing":false}`

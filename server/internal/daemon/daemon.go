@@ -86,8 +86,8 @@ const (
 	taskSlotCapacityBackoff  = 5 * time.Second
 	repoCheckoutModeEnv      = "MULTICA_REPO_CHECKOUT_MODE"
 	repoCheckoutModeIsolated = "isolated"
-	// defaultTaskPrepareTimeout is a hard liveness bound for everything after
-	// claim and before StartTask succeeds: runtime resolution, skill bundles,
+	// defaultTaskPrepareTimeout is a hard liveness bound after the local
+	// worktree queue and before StartTask succeeds: runtime resolution, skill bundles,
 	// execution-environment setup, and the StartTask request itself. It is
 	// intentionally independent from AgentTimeout, which only governs the
 	// provider process after the task reaches running.
@@ -191,6 +191,14 @@ func taskMulticaEnvironment(task Task, provider, agentName, token, configRoot, w
 		"TMPDIR":               tempDir,
 		"TMP":                  tempDir,
 		"TEMP":                 tempDir,
+	}
+	if task.QuickCreatePrompt != "" {
+		assigneeType, assigneeID := "agent", task.AgentID
+		if task.SquadID != "" {
+			assigneeType, assigneeID = "squad", task.SquadID
+		}
+		env["MULTICA_QUICK_CREATE_DEFAULT_ASSIGNEE_TYPE"] = assigneeType
+		env["MULTICA_QUICK_CREATE_DEFAULT_ASSIGNEE_ID"] = assigneeID
 	}
 	if runtime.GOOS != "windows" {
 		return env
@@ -688,7 +696,7 @@ type Daemon struct {
 
 	activeEnvRootsMu   sync.Mutex
 	activeEnvRootsCond *sync.Cond      // signalled when an in-flight env-root GC mutation finishes
-	activeEnvRoots     map[string]int  // env root path -> reference count (handles reuse paths marked twice)
+	activeEnvRoots     map[string]int  // env root guard key -> reference count (handles reuse paths marked twice)
 	deletingEnvRoots   map[string]bool // env roots reserved by GC; new tasks wait until the mutation finishes
 
 	activeStoresMu   sync.Mutex
@@ -738,7 +746,7 @@ type Daemon struct {
 	// executionEnvironmentCommand resolves the killable helper used for
 	// Prepare/Reuse. New always sets it; nil keeps focused unit tests in-process.
 	executionEnvironmentCommand executionEnvironmentCommand
-	// taskPrepareTimeout is the dispatched -> running hard deadline. New sets
+	// taskPrepareTimeout is the preparation deadline, excluding snapshot queue time. New sets
 	// the production default; zero-valued test daemons fall back to the same
 	// default in effectiveTaskPrepareTimeout.
 	taskPrepareTimeout time.Duration
@@ -2090,6 +2098,12 @@ func (d *Daemon) run(ctx context.Context, healthLn net.Listener) error {
 		logFields = append(logFields, "profile", d.cfg.Profile)
 	}
 	d.logger.Info("starting daemon", logFields...)
+	// Sweep orphaned ZCode provider credential snapshots left by a prior
+	// crash/SIGKILL (prepareZcodeRuntimeEnv writes 0600 files under
+	// $TMPDIR/multica-zcode-providers-*; normal exits remove them in defer).
+	if n := agent.CleanupStaleZcodeProviderSnapshots(); n > 0 {
+		d.logger.Info("removed stale ZCode provider credential snapshots", "count", n)
+	}
 	d.logger.Debug("daemon config resolved",
 		"daemon_id", d.cfg.DaemonID,
 		"device_name", d.cfg.DeviceName,
@@ -5761,13 +5775,11 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		taskLog.Error("resolve stable task env root", "error", resolveRootErr)
 	}
 	if resolvedEnvRoot != "" {
-		d.markActiveEnvRoot(resolvedEnvRoot)
-		defer d.unmarkActiveEnvRoot(resolvedEnvRoot)
+		defer d.markActiveEnvRoot(resolvedEnvRoot)()
 	}
 	if task.PriorWorkDir != "" {
 		if priorRoot := filepath.Dir(task.PriorWorkDir); priorRoot != "" && priorRoot != resolvedEnvRoot {
-			d.markActiveEnvRoot(priorRoot)
-			defer d.unmarkActiveEnvRoot(priorRoot)
+			defer d.markActiveEnvRoot(priorRoot)()
 		}
 	}
 
@@ -5806,13 +5818,18 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		err = nil // Cleanup uncertainty must outrank worktree-finalization errors.
 	}
 
+	// Shutdown cancels ctx before the runner returns. Keep the final usage,
+	// server-cancellation check and acknowledgement deliverable during cleanup.
+	finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), terminalTaskReportTimeout)
+	defer finalCancel()
+
 	// Report usage before any early return — the agent accumulates tokens
 	// whether the task completes, errors, or is cancelled mid-run by the poll
 	// goroutine. Both claude.go and codex.go populate result.Usage even when
 	// runCtx is cancelled, so dropping this on the cancelled path silently
 	// under-reports billing.
 	if len(result.Usage) > 0 {
-		if usageErr := d.client.ReportTaskUsage(ctx, task.ID, result.Usage); usageErr != nil {
+		if usageErr := d.client.ReportTaskUsage(finalCtx, task.ID, result.Usage); usageErr != nil {
 			taskLog.Warn("report task usage failed", "error", usageErr)
 		}
 	}
@@ -5836,7 +5853,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		// got a single message out of must not stay this issue's resume
 		// pointer (MUL-8188).
 		ack := taskCancelAcknowledgement(result, err, provider)
-		if ackErr := d.client.AckTaskCancelled(ctx, task.ID, ack); ackErr != nil {
+		if ackErr := d.client.AckTaskCancelled(finalCtx, task.ID, ack); ackErr != nil {
 			taskLog.Warn("cancel ack failed; server sweeper will finalize", "error", ackErr)
 		}
 		return
@@ -5867,14 +5884,14 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		return
 	}
 
-	_ = d.client.ReportProgress(ctx, task.ID, "Finishing task", 2, 2)
+	_ = d.client.ReportProgress(finalCtx, task.ID, "Finishing task", 2, 2)
 
 	// Final pre-completion check: if the server already moved the task to a
 	// terminal state (completed/failed/cancelled) or deleted the row
 	// outright, skip reporting — the complete/fail callbacks would fail
 	// anyway. Reuse shouldInterruptAgent so this guard honors the same
 	// signals as the in-flight watcher.
-	if status, err := d.client.GetTaskStatus(ctx, task.ID); shouldInterruptAgent(status, err) {
+	if status, err := d.client.GetTaskStatus(finalCtx, task.ID); shouldInterruptAgent(status, err) {
 		taskLog.Info("task cancelled during execution, discarding result",
 			"status", status, "error", err, "branch_name", result.BranchName)
 		// Same contract as the poll-cancelled path above: the transcript is
@@ -5886,10 +5903,20 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		// completed/failed rows the complete/fail callback is the
 		// authoritative channel and a stale run's late ack must not touch
 		// them.
-		if ackErr := d.client.AckTaskCancelled(ctx, task.ID, taskCancelAcknowledgement(result, nil, provider)); ackErr != nil {
+		if ackErr := d.client.AckTaskCancelled(finalCtx, task.ID, taskCancelAcknowledgement(result, nil, provider)); ackErr != nil {
 			taskLog.Warn("cancel ack failed; server sweeper will finalize", "error", ackErr)
 		}
 		return
+	}
+
+	// Only the parent (daemon) context identifies shutdown. A cancelled agent
+	// with a live parent remains a deliberate cancellation; server terminal
+	// states and poll cancellation have already taken precedence above.
+	// Infrastructure interruptions carry a diagnostic, matching server-side orphan
+	// recovery; deliberate cancellation relies on its localized reason label.
+	if result.Status == "cancelled" && result.FailureReason == "" && errors.Is(ctx.Err(), context.Canceled) {
+		result.FailureReason = taskfailure.ReasonRuntimeRecovery.String()
+		result.Comment = "daemon shut down while task was in flight"
 	}
 
 	d.reportTaskResult(ctx, task.ID, result, taskLog)
@@ -6267,13 +6294,26 @@ func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Tas
 		}
 		taskLog.Error("local_directory: lock acquire failed", "error", err)
 		failureReason := "local_directory_error"
+		errorMessage := fmt.Sprintf("local_directory wait cancelled: %s", err.Error())
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			failureReason = "cancelled"
+			if errors.Is(ctx.Err(), context.Canceled) {
+				// Shutdown can stop the wait poller before it observes a user
+				// cancellation. Honor server terminal state before enabling retry.
+				finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), terminalTaskReportTimeout)
+				defer finalCancel()
+				if status, statusErr := d.client.GetTaskStatus(finalCtx, task.ID); shouldInterruptAgent(status, statusErr) {
+					taskLog.Info("local_directory: wait aborted by server-side terminal state", "status", status, "error", statusErr)
+					return nil, true
+				}
+				failureReason = taskfailure.ReasonRuntimeRecovery.String()
+				errorMessage = "daemon shut down while task was waiting for its local directory lock"
+			}
 		}
 		if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
 			kind:          terminalTaskReportFail,
 			taskID:        task.ID,
-			errorMessage:  fmt.Sprintf("local_directory wait cancelled: %s", err.Error()),
+			errorMessage:  errorMessage,
 			failureReason: failureReason,
 		}); failErr != nil {
 			taskLog.Error("fail task after local_directory lock cancel", "error", failErr)
@@ -6518,6 +6558,7 @@ var runtimeDisplayNameOverrides = map[string]string{
 	"qwenpaw":    "QwenPaw",
 	"mcode":      "MiniMax Code",
 	"muse":       "Muse Code",
+	"zcode":      "ZCode",
 	"zeroclaw":   "ZeroClaw",
 }
 
@@ -6594,6 +6635,10 @@ func providerNeedsInlineSystemPrompt(provider string) bool {
 // Codex also has a conversation-scoped store for local_directory tasks. A
 // continued worktree may use a new cwd while retaining its branch and rollout.
 // Managed Codex tasks still require the same existing directory.
+// Claude is cwd-keyed and has no conversation-scoped store, but a continued
+// worktree can bring the prior transcript with it: when the transcript has
+// been migrated into this run's encoded projects directory (#9731), the same
+// relaxed rule applies. Everywhere else Claude keeps the strict rule.
 // sameExistingDir reports whether two paths name the same existing directory.
 // False when either cannot be stat'd, which is the safe answer for cwd-keyed
 // providers: an absent prior workdir means there is nothing to resume from.
@@ -6620,13 +6665,91 @@ func codexWorktreeResumeEligible(env *execenv.Environment, store string) bool {
 	return env != nil && env.LocalWorktree != nil && env.LocalWorktree.Continued && env.CodexHome != "" && store != ""
 }
 
-func gateResumeToReachableSession(task *Task, taskCtx *execenv.TaskContextForEnv, provider, envWorkDir string, sessionHomeReachable, refusesMissingSessionCwd, codexWorktreeResumeEligible bool, taskLog *slog.Logger) bool {
+// encodeClaudeCwd mirrors Claude Code's on-disk projects directory naming: it
+// flattens the task's cwd by replacing every non-alphanumeric character with a
+// dash, so /home/u/repo resolves to ~/.claude/projects/-home-u-repo. The
+// mapping is lossy (two cwds can flatten to the same name), which is fine —
+// the CLI resolves sessions through the same mapping.
+// Long-path truncation/hashing and Windows drive-letter normalization are not
+// modeled here; paths requiring them may fall back to a fresh session.
+func encodeClaudeCwd(cwd string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, cwd)
+}
+
+// migrateClaudeWorktreeTranscript copies the prior session's transcript into
+// this run's encoded projects directory so Claude Code can resolve it from the
+// continued worktree's new cwd (#9731). Claude Code looks sessions up under
+// <config-dir>/projects/<encoded-cwd>/ and only falls back to a global search
+// when the local directory misses; copying the transcript in makes the resume
+// take the primary path instead of depending on that fallback. Idempotent: a
+// transcript already present from an earlier migration is left as-is. Reports
+// whether this run's directory now holds the transcript — anything else
+// (changed cwd outside a continued worktree, missing source, unwritable
+// destination) reports false and the gate keeps the strict same-directory
+// rule. The copy left behind in the prior task's directory is orphaned until
+// the operator or a future GC pass reclaims it.
+func migrateClaudeWorktreeTranscript(env *execenv.Environment, sessionID, envWorkDir, priorWorkDir string, childEnv map[string]string, taskLog *slog.Logger) bool {
+	if env == nil || env.LocalWorktree == nil || !env.LocalWorktree.Continued {
+		return false
+	}
+	if sessionID == "" || priorWorkDir == "" || envWorkDir == "" || priorWorkDir == envWorkDir {
+		return false
+	}
+	if sessionID == "." || sessionID == ".." || strings.ContainsAny(sessionID, "/\\:\x00") {
+		taskLog.Debug("claude: invalid session id for transcript migration")
+		return false
+	}
+	priorConfigDir, err := agent.ClaudeConfigDir(childEnv, priorWorkDir)
+	if err != nil {
+		taskLog.Debug("claude: cannot resolve prior transcript config directory", "error", err)
+		return false
+	}
+	configDir, err := agent.ClaudeConfigDir(childEnv, envWorkDir)
+	if err != nil {
+		taskLog.Debug("claude: cannot resolve transcript config directory", "error", err)
+		return false
+	}
+	src := filepath.Join(priorConfigDir, "projects", encodeClaudeCwd(priorWorkDir), sessionID+".jsonl")
+	dstDir := filepath.Join(configDir, "projects", encodeClaudeCwd(envWorkDir))
+	dst := filepath.Join(dstDir, sessionID+".jsonl")
+	if info, err := os.Stat(dst); err == nil && info.Mode().IsRegular() {
+		return true
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		taskLog.Debug("claude: cannot read prior session transcript", "path", src, "error", err)
+		return false
+	}
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		taskLog.Debug("claude: cannot create transcript directory", "path", dstDir, "error", err)
+		return false
+	}
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		taskLog.Debug("claude: cannot write migrated transcript", "path", dst, "error", err)
+		return false
+	}
+	taskLog.Info("claude: migrated prior session transcript into the continued worktree cwd",
+		"session_id", sessionID,
+		"prior_workdir", priorWorkDir,
+		"workdir", envWorkDir,
+	)
+	return true
+}
+
+func gateResumeToReachableSession(task *Task, taskCtx *execenv.TaskContextForEnv, provider, envWorkDir string, sessionHomeReachable, refusesMissingSessionCwd, codexWorktreeResumeEligible, claudeResumeReady bool, taskLog *slog.Logger) bool {
 	var reachable bool
 	if providerUsesPiSessionFile(provider) {
 		reachable = piSessionResumable(task.PriorSessionID, refusesMissingSessionCwd)
 	} else if provider == "hermes" {
 		reachable = sessionHomeReachable
 	} else if provider == "codex" && codexWorktreeResumeEligible {
+		reachable = sessionHomeReachable
+	} else if provider == "claude" && claudeResumeReady {
 		reachable = sessionHomeReachable
 	} else {
 		// Compare the directories, not the spelling. Reuse runs in the canonical
@@ -7731,6 +7854,57 @@ func qualifyTaskModel(
 	return qualified
 }
 
+// acquireWorktreePreparationQueue keeps repository snapshot/checkouts serial,
+// without charging sibling tasks' queue time to the preparation deadline.
+// Cancellation and lease renewal remain active throughout the wait.
+func (d *Daemon) acquireWorktreePreparationQueue(ctx context.Context, task Task, localAssignment *localDirectoryAssignment, taskLog *slog.Logger) (func(), error) {
+	if !localAssignment.UsesWorktree() {
+		return func() {}, nil
+	}
+	stopLease := d.startTaskPrepareLeaseExtender(ctx, task, taskLog)
+	defer stopLease()
+	waitCtx, waitCancel := context.WithCancel(ctx)
+	defer waitCancel()
+	pollInterval := d.cancelPollInterval
+	if pollInterval == 0 {
+		pollInterval = 5 * time.Second
+	}
+	// LocalPathLocker invokes onWait synchronously, in this goroutine,
+	// at most once per Acquire — see the in-place call site.
+	waitCounted := false
+	release, lockErr := d.localPathLocks.Acquire(waitCtx, localAssignment.RealPath, task.ID, func(holder string) {
+		d.resourceWaitTasks.Add(1)
+		waitCounted = true
+		reason := fmt.Sprintf("local_directory %s", localAssignment.AbsPath)
+		if holder != "" {
+			reason = fmt.Sprintf("%s (held by task %s)", reason, shortID(holder))
+		}
+		taskLog.Info("local_directory: worktree snapshot waiting for holder",
+			"holder", holder)
+		if waitErr := d.client.MarkTaskWaitingLocalDirectory(waitCtx, task.ID, reason); waitErr != nil {
+			// Non-fatal: the wait still happens, the UI just won't
+			// show the explicit "waiting" badge.
+			taskLog.Warn("local_directory: mark waiting status failed", "error", waitErr)
+		}
+		cancelled := d.watchTaskCancellation(waitCtx, task.ID, pollInterval, taskLog)
+		go func() {
+			select {
+			case <-cancelled:
+				waitCancel()
+			case <-waitCtx.Done():
+			}
+		}()
+	})
+	if waitCounted {
+		d.resourceWaitTasks.Add(-1)
+	}
+	if lockErr != nil {
+		return nil, fmt.Errorf("local_directory worktree: wait for a consistent snapshot of %s: %w",
+			localAssignment.AbsPath, lockErr)
+	}
+	return release, nil
+}
+
 func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot int, taskLog *slog.Logger) (taskResult TaskResult, returnErr error) {
 	phaseRecorder := taskPhaseRecorderFromContext(ctx)
 	phaseRecorder.Mark(taskPhasePrepareStarted)
@@ -7750,6 +7924,15 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.WorkspaceID == "" {
 		return TaskResult{}, fmt.Errorf("refusing to spawn agent: task has no workspace_id (task_id=%s)", task.ID)
 	}
+
+	localAssignment, _ := localDirectoryAssignmentForTask(task, d.cfg.DaemonID)
+	// Queue before starting the hard preparation budget. Sibling checkouts and
+	// in-place writers can take longer than that budget without being wedged.
+	releasePreparationQueue, queueErr := d.acquireWorktreePreparationQueue(ctx, task, localAssignment, taskLog)
+	if queueErr != nil {
+		return TaskResult{}, queueErr
+	}
+	defer releasePreparationQueue()
 
 	prepareTimeout := d.effectiveTaskPrepareTimeout()
 	prepareCtx, cancelPrepare := context.WithTimeoutCause(ctx, prepareTimeout, errTaskPrepareTimeout)
@@ -7934,18 +8117,16 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if err != nil {
 		return TaskResult{}, fmt.Errorf("resolve stable task env root: %w", err)
 	}
-	d.markActiveEnvRoot(resolvedRoot)
-	defer d.unmarkActiveEnvRoot(resolvedRoot)
+	defer d.markActiveEnvRoot(resolvedRoot)()
 	if task.PriorWorkDir != "" {
 		priorRoot := filepath.Dir(task.PriorWorkDir)
 		if priorRoot != resolvedRoot {
-			d.markActiveEnvRoot(priorRoot)
-			defer d.unmarkActiveEnvRoot(priorRoot)
+			defer d.markActiveEnvRoot(priorRoot)()
 		}
 	}
 
 	// Claim the env root HERE, in the daemon parent, and hold it for the whole
-	// task run — the same lifetime as unmarkActiveEnvRoot above.
+	// task run, for the same lifetime as the active guard above.
 	//
 	// It cannot be claimed inside preparation: production preparation runs in a
 	// short-lived helper process (prepareExecutionEnvironment ->
@@ -7975,10 +8156,6 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if provider == "openclaw" {
 		openclawBin = entry.Path
 	}
-	// Resolve any local_directory assignment again here so runTask can plumb
-	// LocalWorkDir into execenv. handleTask already validated + locked the
-	// path for worker tasks; leader tasks intentionally skip the assignment.
-	localAssignment, _ := localDirectoryAssignmentForTask(task, d.cfg.DaemonID)
 	// Reuse intentionally skipped for local_directory tasks: the prior
 	// WorkDir is the user's own path (always present) but the reuse path
 	// loses the envRoot association the GC loop needs, and re-running
@@ -8309,68 +8486,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			if d.cfg.PersistentLocalWorktrees {
 				prepParams.LocalWorktree.PersistentRoot = d.cfg.WorkspacesRoot
 			}
-			// Take the per-path mutex for the snapshot alone, then hand it
-			// straight back — long enough to read a consistent tree, short
-			// enough that worktree tasks still overlap for the run itself.
-			//
-			// A worktree task skips this lock for its execution, but the
-			// snapshot is the one moment it READS the user's directory, and the
-			// same real path can be attached to another project as an in_place
-			// resource (each project may attach it once, so several can).
-			// Snapshotting underneath a running in_place task would capture a
-			// half-written tree plus that task's in-flight sidecars.
-			//
-			// The wait gets the same visibility plumbing as the in-place
-			// acquire in acquireLocalDirectoryLockIfNeeded, because the holder
-			// can be an in-place task that runs for hours: without the status
-			// update the user sees a bare "preparing" with no hint the task is
-			// queued behind the directory, and without the poller a task the
-			// user cancels keeps its daemon slot pinned until the prepare
-			// timeout — the run-phase cancellation watcher only starts after
-			// launch. The prepare-lease extender is already running for this
-			// whole phase, so only status, accounting, and cancellation are
-			// mirrored here.
-			waitCtx, waitCancel := context.WithCancel(prepareCtx)
-			defer waitCancel()
-			pollInterval := d.cancelPollInterval
-			if pollInterval == 0 {
-				pollInterval = 5 * time.Second
-			}
-			// LocalPathLocker invokes onWait synchronously, in this goroutine,
-			// at most once per Acquire — see the in-place call site.
-			waitCounted := false
-			release, lockErr := d.localPathLocks.Acquire(waitCtx, localAssignment.RealPath, task.ID, func(holder string) {
-				d.resourceWaitTasks.Add(1)
-				waitCounted = true
-				reason := fmt.Sprintf("local_directory %s", localAssignment.AbsPath)
-				if holder != "" {
-					reason = fmt.Sprintf("%s (held by task %s)", reason, shortID(holder))
-				}
-				taskLog.Info("local_directory: worktree snapshot waiting for holder",
-					"holder", holder)
-				if waitErr := d.client.MarkTaskWaitingLocalDirectory(waitCtx, task.ID, reason); waitErr != nil {
-					// Non-fatal: the wait still happens, the UI just won't
-					// show the explicit "waiting" badge.
-					taskLog.Warn("local_directory: mark waiting status failed", "error", waitErr)
-				}
-				cancelled := d.watchTaskCancellation(waitCtx, task.ID, pollInterval, taskLog)
-				go func() {
-					select {
-					case <-cancelled:
-						waitCancel()
-					case <-waitCtx.Done():
-					}
-				}()
-			})
-			if waitCounted {
-				d.resourceWaitTasks.Add(-1)
-			}
-			if lockErr != nil {
-				return TaskResult{}, fmt.Errorf("local_directory worktree: wait for a consistent snapshot of %s: %w",
-					localAssignment.AbsPath, lockErr)
-			}
 			env, err = d.prepareExecutionEnvironment(prepareCtx, prepParams)
-			release()
+			releasePreparationQueue()
 			if err != nil {
 				return TaskResult{}, asEnvironmentSetupFailure(fmt.Errorf("prepare execution environment: %w", err))
 			}
@@ -8384,12 +8501,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			}
 		}
 	}
+	releasePreparationQueue()
 	phaseRecorder.Mark(taskPhaseEnvironmentReady)
 	// Belt-and-suspenders: also mark whatever root we ended up with, in case
 	// future changes diverge from ResolveRootDir.
 	if env.RootDir != resolvedRoot && env.RootDir != "" {
-		d.markActiveEnvRoot(env.RootDir)
-		defer d.unmarkActiveEnvRoot(env.RootDir)
+		defer d.markActiveEnvRoot(env.RootDir)()
 	}
 	// Finalize the worktree on EVERY exit path, success or failure: commit
 	// whatever the agent left uncommitted, then unregister the worktree from
@@ -8575,6 +8692,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	cancelPrepare()
 	_ = d.client.ReportProgress(ctx, task.ID, fmt.Sprintf("Launching %s", provider), 1, 2)
 
+	originalSkillContext := taskCtx.AgentSkills
+	taskCtx = execenv.ApplyPreparedSkillNames(taskCtx, env.PreparedSkillNames)
 	// usesCustomProfileCommand is the same provenance the backend receives as
 	// agent.Config.BuiltinRuntime: it separates the provider's own discovered
 	// binary from an arbitrary command speaking its protocol. Reused here so
@@ -8587,11 +8706,16 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			return err
 		}
 		home := codexHomeLease.Home()
-		if err := execenv.PrepareFreshCodexConversationHome(home, execenv.CodexHomeOptions{
+		freshTaskCtx := taskCtx
+		freshTaskCtx.AgentSkills = originalSkillContext
+		preparedNames, err := execenv.PrepareFreshCodexConversationHome(home, execenv.CodexHomeOptions{
 			CodexVersion: codexVersion, CodexCustomArgs: codexSandboxArgs,
-		}, taskCtx, taskLog); err != nil {
+		}, freshTaskCtx, taskLog)
+		if err != nil {
 			return err
 		}
+		env.PreparedSkillNames = preparedNames
+		taskCtx.AgentSkills = execenv.ApplyPreparedSkillNames(freshTaskCtx, preparedNames).AgentSkills
 		env.CodexHome = home
 		return nil
 	}
@@ -8601,11 +8725,18 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			return TaskResult{}, asEnvironmentSetupFailure(errors.New("persisted Codex rollout is unavailable; restore its cold backup or explicitly start a fresh session"))
 		}
 	}
+	// Claude's config lookup needs only the inherited environment plus allowed
+	// custom_env; taskMulticaEnvironment below does not override its config or
+	// home variables. Apply the same blocklist as the eventual child env.
+	claudeResumeReady := provider == "claude" && migrateClaudeWorktreeTranscript(
+		env, task.PriorSessionID, env.WorkDir, task.PriorWorkDir, sanitizeAgentEnv(agentEnvOverrides), taskLog,
+	)
 	resumeReachable := gateResumeToReachableSession(
 		&task, &taskCtx, provider, env.WorkDir,
 		sessionHomeReachable(provider, env, envReused),
 		providerRefusesMissingSessionCwd(provider, !usesCustomProfileCommand),
 		provider == "codex" && codexWorktreeResumeEligible(env, execenv.CodexSessionStorePath(d.cfg.Profile, taskCtx)),
+		claudeResumeReady,
 		taskLog,
 	)
 	// The upstream cwd gate may deliberately choose a cold session after a project
@@ -8624,7 +8755,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		gateCodexResumeToRolloutPresence(&task, &taskCtx, provider, env.CodexHome, taskLog)
 	}
 
-	// Inject runtime-specific config (meta skill) so the agent discovers .agent_context/.
+	// Build the runtime brief and inject it into the provider-specific
+	// instruction file when supported.
 	runtimeBrief, err := execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx)
 	if err != nil {
 		if codexHomeLease != nil {
@@ -8653,6 +8785,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// the daemon cannot record either (#9404).
 	if env.LocalWorktree != nil {
 		promptOptions = append(promptOptions, WithWorktreeBranch(env.LocalWorktree.Branch, env.LocalWorktree.BaseCommit))
+		// The branch block's rule for uncommitted files has one exception,
+		// decided by the same predicate Finalize uses (#9788 review).
+		if env.LocalWorktree.CommitsAllLeftovers() {
+			promptOptions = append(promptOptions, WithWorktreeCommitsAllLeftovers())
+		}
 	}
 	prompt := BuildPrompt(task, provider, promptOptions...)
 
@@ -8693,13 +8830,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			}
 		}
 	}
-	// Ensure the multica CLI is on PATH inside the agent's environment.
-	// Some runtimes (e.g. Codex) run in an isolated sandbox that may not
-	// inherit the daemon's PATH. Prepend the directory of the running
-	// multica binary so that `multica` commands in the agent always resolve.
-	if selfBin, err := resolveSelfExecutable(); err == nil {
-		binDir := filepath.Dir(selfBin)
-		agentEnv["PATH"] = binDir + string(os.PathListSeparator) + os.Getenv("PATH")
+	if err := configureTaskCLIEnvironment(agentEnv); err != nil {
+		return TaskResult{}, err
 	}
 	// Point Codex to the per-task CODEX_HOME so it discovers skills natively
 	// without polluting the system ~/.codex/skills/.
@@ -8906,6 +9038,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		EnableTaskSupplement:       taskSupplementNegotiated,
 		CursorHookCommand:          cursorHookCommand,
 		Cwd:                        env.WorkDir,
+		PiSkillPaths:               env.PiSkillPaths,
 		Model:                      model,
 		ThreadName:                 deriveTaskThreadName(task),
 		Timeout:                    d.cfg.AgentTimeout,
@@ -9014,6 +9147,19 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	d.reportThinkingLevelWarning(ctx, task.ID, selection.ThinkingLevelWarning, &msgSeq, taskLog)
 	outputObserver := &taskOutputObserver{}
 	ctx = withTaskOutputObserver(ctx, outputObserver)
+	// STOE-30: mirror the agent's cumulative token counters into task_usage
+	// while the run is live, so a long run's cost moves on the board instead of
+	// appearing only after it ends. The backend calls OnUsage from its protocol
+	// reader goroutine, so this records the latest snapshot only; the flush
+	// goroutine owns the HTTP call and its cadence.
+	var liveUsage atomic.Value // []TaskUsageEntry
+	execOpts.OnUsage = func(usage map[string]agent.TokenUsage) {
+		if entries := taskUsageEntries(provider, usage); len(entries) > 0 {
+			liveUsage.Store(entries)
+		}
+	}
+	stopUsageFlush := d.startUsageFlush(ctx, task.ID, &liveUsage, taskLog)
+	defer stopUsageFlush()
 	if codexHomeLease != nil {
 		codexHomeSafeToRelease = false
 	}
@@ -9093,7 +9239,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		if codexHomeLease != nil {
 			codexHomeSafeToRelease = false
 		}
-		retryResult, retryTools, retryErr := d.executeAndDrain(ctx, backend, freshPrompt, execOpts, taskLog, task.ID, env.CodexHome, &msgSeq, codexHomeLease)
+		retryResult, retryTools, retryErr := d.executeAndDrain(ctx, backend, freshPrompt, withPriorTaskUsage(execOpts, firstUsage), taskLog, task.ID, env.CodexHome, &msgSeq, codexHomeLease)
 		if codexHomeLease != nil {
 			codexHomeSafeToRelease = retryResult.ProcessCleanupConfirmed
 		}
@@ -9155,22 +9301,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		"agent_error", result.Error,
 	)
 
-	// Convert agent usage map to task usage entries.
-	var usageEntries []TaskUsageEntry
-	for model, u := range result.Usage {
-		if u.InputTokens == 0 && u.OutputTokens == 0 && u.CacheReadTokens == 0 && u.CacheWriteTokens == 0 && u.CostUSDTicks <= 0 {
-			continue
-		}
-		usageEntries = append(usageEntries, TaskUsageEntry{
-			Provider:         provider,
-			Model:            model,
-			InputTokens:      u.InputTokens,
-			OutputTokens:     u.OutputTokens,
-			CacheReadTokens:  u.CacheReadTokens,
-			CacheWriteTokens: u.CacheWriteTokens,
-			CostUSDTicks:     u.CostUSDTicks,
-		})
-	}
+	// Convert agent usage map to task usage entries. Same conversion the live
+	// flush above uses, so both reports write the same rows.
+	usageEntries := taskUsageEntries(provider, result.Usage)
 
 	// MUL-5305: withhold a Codex session whose rollout never reached the per-issue
 	// store, for ANY terminal state — including `completed`, since a completed
@@ -9299,21 +9432,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			Usage:         usageEntries,
 		}, nil
 	case "cancelled":
-		// The daemon's own context was cancelled (server cancel or daemon
-		// shutdown): the parent context cancellation propagates here as
-		// context.Canceled and the fail callback runs. A user cancel or issue
-		// reassignment is discarded earlier by handleTask's cancelledByPoll
-		// branch, so this case is mainly defensive — and preserves the
-		// "cancelled" status string for the "agent finished" log line so
-		// operators can distinguish a server cancellation from a real timeout.
-		//
-		// Comment stays empty on purpose. reportTaskResult forwards it as the
-		// task's `error`, which the UI shows verbatim under "Technical
-		// details", so a sentence written here would reach the reader
-		// untranslated. The status alone already yields failure_reason
-		// "cancelled", whose label is localized in every shipped locale, and
-		// it says the same thing — an English sentence beside it would only
-		// be a worse copy of it.
+		// handleTask distinguishes daemon shutdown from explicit cancellation
+		// using its parent context, after checking the server's terminal state.
+		// Keep deliberate cancellation's comment empty: its localized reason
+		// already explains the outcome without untranslated duplicate prose.
 		return TaskResult{
 			Status:    "cancelled",
 			SessionID: result.SessionID,
@@ -9572,7 +9694,7 @@ func (d *Daemon) repairWorktreeDelivery(ctx context.Context, backend agent.Backe
 	taskLog.Warn("local_directory: worktree delivery would be refused; asking the agent to repair it",
 		"branch", problem.Branch, "base", problem.BaseCommit, "tip", problem.Tip, "reason", problem.Reason)
 
-	opts := execOpts
+	opts := withPriorTaskUsage(execOpts, result.Usage)
 	// Continue the conversation when there is one, so the agent knows what it
 	// just did; the prompt is self-contained for the backends that cannot.
 	opts.ResumeSessionID = result.SessionID
@@ -9663,6 +9785,106 @@ func freshSessionMayHelp(errText string) bool {
 	default:
 		return true
 	}
+}
+
+// withPriorTaskUsage keeps retries and repair turns on the same task-wide total
+// as the terminal report, even though each backend execution starts at zero.
+func withPriorTaskUsage(opts agent.ExecOptions, prior map[string]agent.TokenUsage) agent.ExecOptions {
+	if report := opts.OnUsage; report != nil && len(prior) > 0 {
+		opts.OnUsage = func(usage map[string]agent.TokenUsage) { report(mergeUsage(prior, usage)) }
+	}
+	return opts
+}
+
+// taskUsageEntries converts a backend's per-model usage map into the rows the
+// server upserts. A model whose buckets are all zero is skipped rather than
+// written as 0: an unreported run keeps its cost NULL server-side, which is what
+// makes the board render it as unknown instead of $0.
+func taskUsageEntries(provider string, usage map[string]agent.TokenUsage) []TaskUsageEntry {
+	var entries []TaskUsageEntry
+	for model, u := range usage {
+		if u.InputTokens == 0 && u.OutputTokens == 0 && u.CacheReadTokens == 0 && u.CacheWriteTokens == 0 && u.CostUSDTicks <= 0 {
+			continue
+		}
+		entries = append(entries, TaskUsageEntry{
+			Provider:         provider,
+			Model:            model,
+			InputTokens:      u.InputTokens,
+			OutputTokens:     u.OutputTokens,
+			CacheReadTokens:  u.CacheReadTokens,
+			CacheWriteTokens: u.CacheWriteTokens,
+			CostUSDTicks:     u.CostUSDTicks,
+		})
+	}
+	// Stable ordering lets the flush compare snapshots across map iterations.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Model < entries[j].Model })
+	return entries
+}
+
+// liveUsageFlushEvery bounds how often a running task's cumulative counters are
+// POSTed. The agent emits them per model call; this only bounds the traffic.
+const liveUsageFlushEvery = 30 * time.Second
+
+// startUsageFlush POSTs the newest snapshot held in `live` until the returned
+// stop func runs, so a long run's cost is visible before it ends (STOE-30).
+// Repeating it is safe by construction: UpsertTaskUsage overwrites absolutely
+// per (task_id, provider, model) and bumps updated_at, which is what makes the
+// hourly rollup re-aggregate those rows, so cumulative snapshots cannot add up
+// twice. It is sent as a snapshot so the server keeps its additive metrics
+// counter on the terminal report (see Client.ReportTaskUsageSnapshot). That
+// report stays the authoritative final value, so the caller stops this flush
+// before the terminal report is made.
+func (d *Daemon) startUsageFlush(ctx context.Context, taskID string, live *atomic.Value, taskLog *slog.Logger) (stop func()) {
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(liveUsageFlushEvery)
+		defer ticker.Stop()
+		var reported string
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				select {
+				case <-done:
+					return
+				case <-ctx.Done():
+					return
+				default:
+				}
+				entries, _ := live.Load().([]TaskUsageEntry)
+				if len(entries) == 0 {
+					continue
+				}
+				// An idle agent costs nothing: re-posting the numbers the server
+				// already has is traffic, not information.
+				key := fmt.Sprintf("%v", entries)
+				if key == reported {
+					continue
+				}
+				// Preserve ordering with the terminal report even when the run is
+				// cancelled. The HTTP timeout still bounds an in-flight request.
+				if err := d.client.ReportTaskUsageSnapshot(context.WithoutCancel(ctx), taskID, entries); err != nil {
+					// Not fatal — the terminal report carries the run's usage
+					// again if a flush is lost.
+					taskLog.Warn("live usage flush failed", "error", err)
+					continue
+				}
+				reported = key
+			}
+		}
+	}()
+	return sync.OnceFunc(func() {
+		close(done)
+		// Let an in-flight POST finish before the terminal overwrite. Cancelling
+		// only the client request can return before the server finishes writing.
+		// The control-plane HTTP client's timeout bounds this wait.
+		<-stopped
+	})
 }
 
 // executeAndDrain runs a backend, drains its message stream (forwarding to the
@@ -10531,42 +10753,58 @@ func convertProjectResourcesForEnv(resources []ProjectResourceData) []execenv.Pr
 	return result
 }
 
-// markActiveEnvRoot records that a task is currently using the given env root,
-// so the GC loop won't reclaim its artifacts mid-execution. Calls are
-// reference-counted so a reuse path marked twice (predicted + prior) only
-// becomes inactive after both unmark calls.
-func (d *Daemon) markActiveEnvRoot(envRoot string) {
-	if envRoot == "" {
-		return
+// envRootGuardKey gives a reused root and the path GC scans through the
+// configured workspaces root the same identity, even before a new task root
+// has been created. The key is used only for locking, never as a deletion path.
+func envRootGuardKey(envRoot string) (string, error) {
+	key, err := util.ResolveSymlinksBestEffort(envRoot)
+	if runtime.GOOS == "windows" {
+		// A junction can spell the target with different casing.
+		key = strings.ToLower(key)
 	}
-	d.activeEnvRootsMu.Lock()
-	defer d.activeEnvRootsMu.Unlock()
-	d.ensureActiveEnvRootStateLocked()
-	for d.deletingEnvRoots[envRoot] {
-		d.activeEnvRootsCond.Wait()
-	}
-	d.activeEnvRoots[envRoot]++
+	return key, err
 }
 
-func (d *Daemon) unmarkActiveEnvRoot(envRoot string) {
-	if envRoot == "" {
-		return
+// markActiveEnvRoot protects a root until the returned function is called.
+// The release uses the original key even if a link is moved in the meantime.
+func (d *Daemon) markActiveEnvRoot(envRoot string) (release func()) {
+	key, err := envRootGuardKey(envRoot)
+	if err != nil {
+		// Keep the original guard for this path. GC skips paths whose
+		// identity it cannot resolve.
+		key = filepath.Clean(envRoot)
+	}
+	if key == "" {
+		return func() {}
 	}
 	d.activeEnvRootsMu.Lock()
 	defer d.activeEnvRootsMu.Unlock()
 	d.ensureActiveEnvRootStateLocked()
-	if d.activeEnvRoots[envRoot] <= 1 {
-		delete(d.activeEnvRoots, envRoot)
-		return
+	for d.deletingEnvRoots[key] {
+		d.activeEnvRootsCond.Wait()
 	}
-	d.activeEnvRoots[envRoot]--
+	d.activeEnvRoots[key]++
+
+	return func() {
+		d.activeEnvRootsMu.Lock()
+		defer d.activeEnvRootsMu.Unlock()
+		if d.activeEnvRoots[key] <= 1 {
+			delete(d.activeEnvRoots, key)
+			return
+		}
+		d.activeEnvRoots[key]--
+	}
 }
 
 func (d *Daemon) isActiveEnvRoot(envRoot string) bool {
+	key, err := envRootGuardKey(envRoot)
+	if err != nil {
+		return true
+	}
 	d.activeEnvRootsMu.Lock()
 	defer d.activeEnvRootsMu.Unlock()
 	d.ensureActiveEnvRootStateLocked()
-	return d.activeEnvRoots[envRoot] > 0
+	return d.activeEnvRoots[key] > 0
 }
 
 func (d *Daemon) ensureActiveEnvRootStateLocked() {
@@ -10587,19 +10825,20 @@ func (d *Daemon) ensureActiveEnvRootStateLocked() {
 // the active task and skips, or task startup waits for the mutation to finish
 // and recreates/uses the post-GC environment.
 func (d *Daemon) reserveEnvRootForGC(envRoot string) (release func(), ok bool) {
-	if envRoot == "" {
+	key, err := envRootGuardKey(envRoot)
+	if err != nil || key == "" {
 		return nil, false
 	}
 	d.activeEnvRootsMu.Lock()
 	defer d.activeEnvRootsMu.Unlock()
 	d.ensureActiveEnvRootStateLocked()
-	if d.activeEnvRoots[envRoot] > 0 || d.deletingEnvRoots[envRoot] {
+	if d.activeEnvRoots[key] > 0 || d.deletingEnvRoots[key] {
 		return nil, false
 	}
-	d.deletingEnvRoots[envRoot] = true
+	d.deletingEnvRoots[key] = true
 	return func() {
 		d.activeEnvRootsMu.Lock()
-		delete(d.deletingEnvRoots, envRoot)
+		delete(d.deletingEnvRoots, key)
 		d.activeEnvRootsCond.Broadcast()
 		d.activeEnvRootsMu.Unlock()
 	}, true
@@ -10694,6 +10933,11 @@ func convertSkillsForEnv(skills []SkillData) []execenv.SkillContextForEnv {
 			Name:        s.Name,
 			Description: s.Description,
 			Content:     s.Content,
+		}
+		// Legacy full-skill responses omit Source and give only workspace
+		// skills an ID, matching the server's bundle source classification.
+		if s.Source == skillbundle.SourceBuiltin || (s.Source == "" && s.ID == "") {
+			result[i].BuiltinName = s.Name
 		}
 		for _, f := range s.Files {
 			result[i].Files = append(result[i].Files, execenv.SkillFileContextForEnv{

@@ -25,17 +25,20 @@ const (
 // unregister the daemon-owned checkout without trusting paths discovered from
 // the filesystem.
 type PersistentLocalWorktreeRecord struct {
-	Version          int       `json:"version"`
-	WorkspaceID      string    `json:"workspace_id"`
-	AgentID          string    `json:"agent_id"`
-	ConversationID   string    `json:"conversation_id"`
-	ConversationKind string    `json:"conversation_kind"`
-	GitRoot          string    `json:"git_root"`
-	WorktreePath     string    `json:"worktree_path"`
-	WorkDir          string    `json:"work_dir"`
-	Branch           string    `json:"branch"`
-	Provider         string    `json:"provider"`
-	LastUsedAt       time.Time `json:"last_used_at"`
+	Version          int    `json:"version"`
+	WorkspaceID      string `json:"workspace_id"`
+	AgentID          string `json:"agent_id"`
+	ConversationID   string `json:"conversation_id"`
+	ConversationKind string `json:"conversation_kind"`
+	GitRoot          string `json:"git_root"`
+	WorktreePath     string `json:"worktree_path"`
+	WorkDir          string `json:"work_dir"`
+	Branch           string `json:"branch"`
+	Provider         string `json:"provider"`
+	// PendingLeftoverCleanup prevents crash recovery from committing changes
+	// that a prior turn chose to keep off the branch.
+	PendingLeftoverCleanup bool      `json:"pending_leftover_cleanup,omitempty"`
+	LastUsedAt             time.Time `json:"last_used_at"`
 
 	EntryRoot string `json:"-"`
 }
@@ -73,6 +76,35 @@ func PersistentLocalWorktreeEntryPath(workspacesRoot, localPath, workspaceID, ag
 
 func persistentLocalWorktreePath(entryRoot string) string {
 	return filepath.Join(entryRoot, localWorktreeDirName)
+}
+
+// A killed preparation helper cannot run rollback. Without a published state
+// record we cannot prove that a checkout is disposable, even if Git still has
+// its "initializing" lock. Preserve it, including its branch and dirty files,
+// and repair Git's backlink before allowing a fresh checkout at the stable key.
+// Caller holds the repository lock. Hidden recovery entries are excluded from GC.
+func preserveInterruptedPersistentWorktree(gitRoot, entryRoot string, logger *slog.Logger) error {
+	archive, err := os.MkdirTemp(filepath.Dir(entryRoot), ".interrupted-"+filepath.Base(entryRoot)+"-")
+	if err != nil {
+		return err
+	}
+	savedEntry := filepath.Join(archive, "entry")
+	if err := os.Rename(entryRoot, savedEntry); err != nil {
+		_ = os.Remove(archive)
+		return fmt.Errorf("preserve interrupted persistent worktree: %w", err)
+	}
+	savedPath := persistentLocalWorktreePath(savedEntry)
+	if _, err := os.Lstat(filepath.Join(savedPath, ".git")); err == nil {
+		if out, err := runGit(gitRoot, "worktree", "repair", savedPath); err != nil {
+			return fmt.Errorf("repair interrupted worktree saved at %s: %s: %w", savedPath, strings.TrimSpace(out), err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect interrupted worktree saved at %s: %w", savedPath, err)
+	}
+	if logger != nil {
+		logger.Warn("execenv: preserved persistent worktree without state; rebuilding checkout", "recovery_path", savedPath)
+	}
+	return nil
 }
 
 func readPersistentLocalWorktreeRecord(entryRoot string) (PersistentLocalWorktreeRecord, error) {
@@ -152,6 +184,15 @@ func (w *LocalWorktree) persistRecord() error {
 		Branch:           w.Branch,
 		Provider:         w.PersistentProvider,
 	})
+}
+
+func (w *LocalWorktree) markPendingLeftoverCleanup() error {
+	record, err := readPersistentLocalWorktreeRecord(w.PersistentEntryRoot)
+	if err != nil {
+		return err
+	}
+	record.PendingLeftoverCleanup = true
+	return writePersistentLocalWorktreeRecord(w.PersistentEntryRoot, record)
 }
 
 // Missing subdirectories can be materialized by the user-state replay. Check
@@ -260,6 +301,9 @@ func RemovePersistentLocalWorktree(record PersistentLocalWorktreeRecord, logger 
 	if dirty, err := worktreeIsDirty(current.WorktreePath); err != nil {
 		return err
 	} else if dirty {
+		if current.PendingLeftoverCleanup {
+			return fmt.Errorf("persistent worktree %s has interrupted leftover cleanup; inspect its saved refs before removal", current.WorktreePath)
+		}
 		if _, err := commitEverything(current.WorktreePath, "chore(agent): recovered changes before persistent worktree cleanup", false); err != nil {
 			return fmt.Errorf("checkpoint persistent local worktree before cleanup: %w", err)
 		}

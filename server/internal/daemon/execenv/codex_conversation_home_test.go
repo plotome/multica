@@ -61,6 +61,36 @@ func TestCodexConversationHomeFreshGenerationKeepsLeaseAndBindings(t *testing.T)
 	}
 }
 
+func TestFreshCodexConversationHomeReturnsAllocatedSkillNames(t *testing.T) {
+	shared := t.TempDir()
+	t.Setenv("CODEX_HOME", shared)
+	userSkill := filepath.Join(shared, "skills", "review-multica")
+	if err := os.MkdirAll(userSkill, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userSkill, "SKILL.md"), []byte("user skill"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := ClaimCodexConversationHome(conversationHomeParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	task := TaskContextForEnv{AgentSkills: []SkillContextForEnv{{Name: "review", Content: "first"}, {Name: "review", Content: "second"}}}
+	for range 2 {
+		if err := lease.StartFreshGeneration(); err != nil {
+			t.Fatal(err)
+		}
+		names, err := PrepareFreshCodexConversationHome(lease.Home(), CodexHomeOptions{}, task, testLogger())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(names) != 2 || names[0] != "review" || names[1] != "review-multica-multica" {
+			t.Fatalf("allocated skill names = %q", names)
+		}
+	}
+}
+
 func TestCodexConversationHomePreparationHelperTwoTurns(t *testing.T) {
 	shared := t.TempDir()
 	t.Setenv("CODEX_HOME", shared)

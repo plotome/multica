@@ -58,6 +58,9 @@
       "required_files": ["server/internal/daemon/execenv/persistent_local_worktree.go"],
       "required_tests": [
         "TestPersistentLocalWorktreeConfig",
+        "TestPersistentLocalWorktreeRecoversMissingState",
+        "TestPersistentLocalWorktreeRetryAfterPreparationTimeout",
+        "TestRunTaskWorktreeQueueDoesNotSpendPrepareBudget",
         "TestPersistentLocalWorktreeReusesPhysicalCheckoutAndRefreshesUserState",
         "TestPersistentLocalWorktreeChangesProjectDirectory",
         "TestPersistentLocalWorktreeChangesRepositoryAndReturns",

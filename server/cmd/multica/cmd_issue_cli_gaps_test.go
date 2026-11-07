@@ -74,6 +74,38 @@ func TestRunIssueCancelTaskByIssue(t *testing.T) {
 	}
 }
 
+func TestRunIssueListOpenCombinesWithUpdatedRange(t *testing.T) {
+	queries, _ := newPropertyFilterTestServer(t)
+	since := "2026-11-05T10:00:00Z"
+	until := "2026-11-05T11:00:00Z"
+	if err := listIssuesWithFlags(t, map[string][]string{
+		"open":          {"true"},
+		"updated-since": {since},
+		"updated-until": {until},
+	}); err != nil {
+		t.Fatalf("runIssueList --open with updated range: %v", err)
+	}
+	if len(*queries) != 1 {
+		t.Fatalf("expected one /api/issues request, got %d", len(*queries))
+	}
+	q := (*queries)[0]
+	if got := q.Get("status_category"); got != "unstarted,started" {
+		t.Errorf("status_category = %q, want unstarted,started", got)
+	}
+	if got := q.Get("date_field"); got != "updated_at" {
+		t.Errorf("date_field = %q, want updated_at", got)
+	}
+	if got := q.Get("date_start"); got != since {
+		t.Errorf("date_start = %q, want %q", got, since)
+	}
+	if got := q.Get("date_end"); got != until {
+		t.Errorf("date_end = %q, want %q", got, until)
+	}
+	if q.Has("status") {
+		t.Errorf("--open must not send a status filter, got %q", q.Get("status"))
+	}
+}
+
 func TestRunIssueListOpenFiltersByUnfinishedCategory(t *testing.T) {
 	queries, _ := newPropertyFilterTestServer(t)
 	if err := listIssuesWithFlags(t, map[string][]string{"open": {"true"}}); err != nil {

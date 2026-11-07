@@ -6425,46 +6425,12 @@ func attachTaskUsage(resp []AgentTaskResponse, byTask map[string][]TaskUsageData
 // Used by the frontend under regular user auth (not daemon auth).
 // Verifies the task belongs to the caller's workspace.
 func (h *Handler) ListTaskMessagesByUser(w http.ResponseWriter, r *http.Request) {
-	taskID := chi.URLParam(r, "taskId")
-	taskUUID, ok := parseUUIDOrBadRequest(w, taskID, "task_id")
+	task, ok := h.loadReadableTask(w, r)
 	if !ok {
 		return
 	}
-
-	task, err := h.Queries.GetAgentTask(r.Context(), taskUUID)
-	if err != nil {
-		if !isNotFound(err) {
-			slog.Warn("get agent task failed", "task_id", taskID, "error", err)
-			writeError(w, http.StatusInternalServerError, "failed to load task")
-			return
-		}
-		writeError(w, http.StatusNotFound, "task not found")
-		return
-	}
-
-	// Verify the task belongs to the caller's workspace. A failed lookup is a
-	// 5xx here too: this endpoint does not drive the daemon's interrupt, but
-	// telling a reader "this task does not exist" because the DB blinked is
-	// the same lie, and it trains clients to give up on a retryable error.
-	scope, err := h.TaskService.ResolveTaskScopeChecked(r.Context(), task)
-	if err != nil {
-		slog.Warn("resolve task workspace failed", "task_id", taskID, "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to load task")
-		return
-	}
-	// Mismatch stays a 404 rather than a 403: a task in another workspace must
-	// be indistinguishable from one that does not exist.
-	wsID := scope.WorkspaceID
-	if wsID == "" || wsID != middleware.WorkspaceIDFromContext(r.Context()) {
-		writeError(w, http.StatusNotFound, "task not found")
-		return
-	}
-	// A chat task's transcript belongs to the chat session's creator alone;
-	// to anyone else it does not exist either.
-	if task.ChatSessionID.Valid && (scope.ChatSessionOwnerID == "" || scope.ChatSessionOwnerID != requestUserID(r)) {
-		writeError(w, http.StatusNotFound, "task not found")
-		return
-	}
+	taskID := uuidToString(task.ID)
+	taskUUID := task.ID
 
 	var (
 		messages []db.TaskMessage

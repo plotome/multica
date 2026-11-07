@@ -111,3 +111,18 @@ ORDER BY seq ASC;
 -- name: DeleteTaskMessages :exec
 DELETE FROM task_message
 WHERE task_id = $1;
+
+-- name: ListTaskMessageDiagnostics :many
+-- Aggregate one run without reading text, inputs or tool outputs into the API.
+SELECT type, count(*) AS count, min(seq)::int AS first_seq,
+       min(created_at)::timestamptz AS first_created_at,
+       count(*) FILTER (WHERE type IN ('tool_use', 'tool_result') OR
+           (type IN ('text', 'thinking') AND coalesce(content, '') <> '')) AS activity_count,
+       coalesce((min(seq) FILTER (WHERE type IN ('tool_use', 'tool_result') OR
+           (type IN ('text', 'thinking') AND coalesce(content, '') <> '')))::int, 0)::int AS first_activity_seq,
+       (min(created_at) FILTER (WHERE type IN ('tool_use', 'tool_result') OR
+           (type IN ('text', 'thinking') AND coalesce(content, '') <> '')))::timestamptz AS first_activity_at
+FROM task_message
+WHERE task_id = $1
+GROUP BY type
+ORDER BY min(seq), type;

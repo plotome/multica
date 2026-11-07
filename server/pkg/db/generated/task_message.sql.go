@@ -225,6 +225,60 @@ func (q *Queries) DeleteTaskMessages(ctx context.Context, taskID pgtype.UUID) er
 	return err
 }
 
+const listTaskMessageDiagnostics = `-- name: ListTaskMessageDiagnostics :many
+SELECT type, count(*) AS count, min(seq)::int AS first_seq,
+       min(created_at)::timestamptz AS first_created_at,
+       count(*) FILTER (WHERE type IN ('tool_use', 'tool_result') OR
+           (type IN ('text', 'thinking') AND coalesce(content, '') <> '')) AS activity_count,
+       coalesce((min(seq) FILTER (WHERE type IN ('tool_use', 'tool_result') OR
+           (type IN ('text', 'thinking') AND coalesce(content, '') <> '')))::int, 0)::int AS first_activity_seq,
+       (min(created_at) FILTER (WHERE type IN ('tool_use', 'tool_result') OR
+           (type IN ('text', 'thinking') AND coalesce(content, '') <> '')))::timestamptz AS first_activity_at
+FROM task_message
+WHERE task_id = $1
+GROUP BY type
+ORDER BY min(seq), type
+`
+
+type ListTaskMessageDiagnosticsRow struct {
+	Type             string             `json:"type"`
+	Count            int64              `json:"count"`
+	FirstSeq         int32              `json:"first_seq"`
+	FirstCreatedAt   pgtype.Timestamptz `json:"first_created_at"`
+	ActivityCount    int64              `json:"activity_count"`
+	FirstActivitySeq int32              `json:"first_activity_seq"`
+	FirstActivityAt  pgtype.Timestamptz `json:"first_activity_at"`
+}
+
+// Aggregate one run without reading text, inputs or tool outputs into the API.
+func (q *Queries) ListTaskMessageDiagnostics(ctx context.Context, taskID pgtype.UUID) ([]ListTaskMessageDiagnosticsRow, error) {
+	rows, err := q.db.Query(ctx, listTaskMessageDiagnostics, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTaskMessageDiagnosticsRow{}
+	for rows.Next() {
+		var i ListTaskMessageDiagnosticsRow
+		if err := rows.Scan(
+			&i.Type,
+			&i.Count,
+			&i.FirstSeq,
+			&i.FirstCreatedAt,
+			&i.ActivityCount,
+			&i.FirstActivitySeq,
+			&i.FirstActivityAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTaskMessages = `-- name: ListTaskMessages :many
 SELECT id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id FROM task_message
 WHERE task_id = $1

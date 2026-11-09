@@ -812,6 +812,11 @@
     "cancel_failed": "Failed to cancel run"
   },
   "execution_log": {
+    "latest": "Latest",
+    "include_children": "Include sub-issues",
+    "loading": "Loading runs...",
+    "load_failed_retry": "Could not load runs. Retry",
+    "empty": "No runs in this scope.",
     "section": "Execution log",
     "cancel_task_tooltip": "Cancel run",
     "cancel_task_aria": "Cancel run",
@@ -982,6 +987,7 @@
     "unassigned": "Unassigned",
     "open_in_new_tab": "Open in new tab",
     "pin_to_sidebar": "Pin to sidebar",
+    "locate_in_sidebar": "Show in sidebar",
     "unpin_from_sidebar": "Unpin from sidebar",
     "restore_to_inbox": "Restore to inbox",
     "mark_read": "Mark as read",

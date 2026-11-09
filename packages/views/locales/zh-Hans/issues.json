@@ -782,6 +782,11 @@
     "cancel_failed": "取消运行失败"
   },
   "execution_log": {
+    "latest": "最近",
+    "include_children": "包含子任务",
+    "loading": "正在加载运行记录...",
+    "load_failed_retry": "无法加载运行记录，点击重试",
+    "empty": "此范围内暂无运行记录。",
     "section": "执行日志",
     "cancel_task_tooltip": "取消运行",
     "cancel_task_aria": "取消运行",
@@ -937,6 +942,7 @@
     "unassigned": "未分配",
     "open_in_new_tab": "在新标签页打开",
     "pin_to_sidebar": "固定到侧边栏",
+    "locate_in_sidebar": "在侧边栏中定位",
     "unpin_from_sidebar": "从侧边栏取消固定",
     "restore_to_inbox": "恢复到收件箱",
     "mark_read": "标为已读",

@@ -140,6 +140,17 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
+	"640_app_action_request_chat_idx":                           "idx_app_action_request_chat",
+	"639_app_tool_call_issue_idx":                               "idx_app_tool_call_issue",
+	"638_app_action_request_task_idx":                           "idx_app_action_request_task",
+	"637_app_tool_call_workspace_idx":                           "idx_app_tool_call_workspace",
+	"636_app_action_request_pending_idx":                        "idx_app_action_request_pending",
+	"635_app_action_request_issue_idx":                          "idx_app_action_request_issue",
+	"634_app_action_rule_scope_idx":                             "idx_app_action_rule_scope",
+	"633_agent_app_workspace_toolkit_idx":                       "idx_agent_app_workspace_toolkit",
+	"632_agent_app_agent_toolkit_idx":                           "idx_agent_app_agent_toolkit",
+	"631_workspace_composio_connection_status_idx":              "idx_workspace_composio_connection_status",
+	"630_workspace_composio_connection_account_idx":             "idx_workspace_composio_connection_account",
 	"598_agent_task_process_cleanup_index":                      "idx_agent_task_queue_process_cleanup",
 	"614_agent_task_queue_runtime_active_index":                 "idx_agent_task_queue_runtime_active",
 	"612_wecom_install_session_begin_rate_idx":                  "idx_wecom_install_session_begin_rate",

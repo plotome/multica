@@ -2,8 +2,16 @@
 import { mkdtemp, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { loadRuntimeConfig } from "./runtime-config-loader";
+
+vi.mock("electron", () => ({
+  app: {
+    getPath: () => {
+      throw new Error("unexpected Electron path lookup in runtime config test");
+    },
+  },
+}));
 
 describe("loadRuntimeConfig", () => {
   it("uses dev env and ignores desktop.json during electron-vite dev", async () => {

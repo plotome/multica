@@ -3,10 +3,40 @@ package agent
 import (
 	"context"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestRewriteFakeMuseServeReplacesExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake muse executable is a shell script")
+	}
+	bin, _, _ := writeFakeMuseServe(t, false)
+	before, err := os.Stat(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := os.OpenFile(bin, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	rewriteFakeMuseServe(t, bin, "      sleep 0.02", "      sleep 0.01")
+	after, err := os.Stat(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) {
+		t.Fatal("rewrote an executable in place; a concurrent writer can make exec fail with ETXTBSY")
+	}
+	if output, err := exec.Command(bin).CombinedOutput(); err != nil {
+		t.Fatalf("execute replaced script: %v: %s", err, output)
+	}
+}
 
 func rewriteFakeMuseServe(t *testing.T, path, old, replacement string) {
 	t.Helper()
@@ -17,7 +47,24 @@ func rewriteFakeMuseServe(t *testing.T, path, old, replacement string) {
 	if !strings.Contains(string(script), old) {
 		t.Fatalf("fake server does not contain %q", old)
 	}
-	if err := os.WriteFile(path, []byte(strings.Replace(string(script), old, replacement, 1)), 0o755); err != nil {
+	// Never rewrite the executable inode in place. On Linux, an exec racing a
+	// writer on that inode fails with ETXTBSY even when the script is complete.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".muse-rewrite-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	if _, err := tmp.Write([]byte(strings.Replace(string(script), old, replacement, 1))); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmp.Chmod(0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
 		t.Fatal(err)
 	}
 }

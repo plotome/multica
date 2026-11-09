@@ -9,7 +9,7 @@
 -- person.
 --
 -- No foreign keys (repo rule): workspace and agent teardown delete these rows
--- explicitly. Every index is built concurrently in 618-628, following
+-- explicitly. Every index is built concurrently in 630-640, following
 -- wecom_install_session (600-604), so no migration builds an index inline on a
 -- live table. The tables start empty, so the window between this migration
 -- and its indexes carries no load.

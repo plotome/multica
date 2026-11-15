@@ -89,7 +89,10 @@ import { ShortcutKeycaps } from "../common/shortcut-keycaps";
 import { useDownloadAttachment } from "./use-download-attachment";
 import { useAttachmentDownloadState } from "./hooks/use-attachment-download-state";
 import { useAttachmentHtmlText } from "./hooks/use-attachment-html-text";
-import { useResignedInlineMedia } from "./hooks/use-inline-media-url";
+import {
+  useResignedInlineMedia,
+  MEDIA_PREVIEW_MAX_BYTES,
+} from "./hooks/use-inline-media-url";
 import { useZoomCanvas, type ZoomCanvasApi } from "./hooks/use-zoom-canvas";
 import { ZoomCanvas, ZoomControls } from "./zoom-canvas";
 import type { Size } from "./utils/zoom-transform";
@@ -753,10 +756,12 @@ function PreviewPanel({
   // clicked, so — unlike the click-through path, where <Attachment> had
   // already upgraded the URL — the viewer has to run the re-sign itself. A
   // no-op for URLs that are already loadable (signed CDN, public storage).
+  const isTimedMedia = kind === "video" || kind === "audio";
   const resigned = useResignedInlineMedia(
     state.attachmentId ?? undefined,
     state.mediaUrl,
-    kind === "image",
+    kind === "image" || isTimedMedia,
+    isTimedMedia ? MEDIA_PREVIEW_MAX_BYTES : undefined,
   );
   // Until that upgrade lands the picked URL may be one this client cannot
   // load natively (desktop, split-origin web); handed to <img> it would fail
@@ -1050,6 +1055,7 @@ function PreviewPanel({
                 source={source}
                 state={state}
                 view={view}
+                resolvedMedia={isTimedMedia ? resigned : undefined}
                 onDownload={handleDownload}
                 downloading={downloading}
                 onBackdropClick={closeOnBackdrop}
@@ -1355,6 +1361,7 @@ function PreviewContent({
   source,
   state,
   view,
+  resolvedMedia,
   onDownload,
   downloading,
   onBackdropClick,
@@ -1363,6 +1370,7 @@ function PreviewContent({
   source: PreviewSource;
   state: PreviewState;
   view: StageView;
+  resolvedMedia?: { url: string; pending: boolean; error?: Error };
   onDownload: () => void;
   downloading: boolean;
   onBackdropClick: (e: React.MouseEvent) => void;
@@ -1388,6 +1396,25 @@ function PreviewContent({
     return (
       <UnsupportedFallback
         message={t(($) => $.attachment.preview_unsupported)}
+        onDownload={onDownload}
+        downloading={downloading}
+      />
+    );
+  }
+
+  if (resolvedMedia?.pending) {
+    return (
+      <div className="flex h-full items-center justify-center text-muted-foreground">
+        {t(($) => $.attachment.preview_loading)}
+      </div>
+    );
+  }
+  if (resolvedMedia?.error) {
+    return (
+      <UnsupportedFallback
+        message={resolvedMedia.error instanceof PreviewTooLargeError
+          ? t(($) => $.attachment.preview_too_large)
+          : t(($) => $.attachment.preview_failed)}
         onDownload={onDownload}
         downloading={downloading}
       />
@@ -1421,7 +1448,7 @@ function PreviewContent({
       return (
         <div className="flex h-full w-full items-center justify-center pb-4">
           <video
-            src={state.mediaUrl}
+            src={resolvedMedia?.url}
             controls
             className="h-full w-full object-contain"
           />
@@ -1430,7 +1457,7 @@ function PreviewContent({
     case "audio":
       return (
         <div className="dark flex h-full w-full items-center justify-center p-8">
-          <audio src={state.mediaUrl} controls className="w-full max-w-xl" />
+          <audio src={resolvedMedia?.url} controls className="w-full max-w-xl" />
         </div>
       );
     case "markdown":

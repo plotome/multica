@@ -4260,8 +4260,9 @@ export class ApiClient {
   // only upgrades `download_url` to a signed storage URL under CloudFront
   // signing or presign mode; in **proxy** mode (self-hosted MinIO or any
   // storage endpoint on an internal host, which the default `auto` mode
-  // classifies as proxy) it returns the auth-gated API path again. Clients
-  // that cannot ride the session cookie on a native `<img>` resource fetch —
+  // classifies as proxy) it returns a short-lived download capability.
+  // Buffered previews outlive that capability. Clients
+  // that cannot ride the session cookie on a native media resource fetch —
   // Desktop's file:// renderer, the mobile webview, split-origin web — get
   // the bytes here and render them from an object URL instead.
   //
@@ -4270,9 +4271,32 @@ export class ApiClient {
   // Callers must only reach for this once the metadata refresh has shown
   // there is no signed URL: in the other modes the endpoint 302s to storage,
   // where CORS is not configured for a JS fetch.
-  async getAttachmentBlob(id: string): Promise<Blob> {
+  async getAttachmentBlob(id: string, maxBytes?: number): Promise<Blob> {
     const res = await this.fetchRaw(`/api/attachments/${id}/download`);
-    return res.blob();
+    if (maxBytes === undefined) return res.blob();
+    if (Number(res.headers.get("Content-Length")) > maxBytes) {
+      await res.body?.cancel();
+      throw new PreviewTooLargeError();
+    }
+    if (!res.body) return new Blob([], { type: res.headers.get("Content-Type") ?? "" });
+    const reader = res.body.getReader();
+    const chunks: Uint8Array<ArrayBuffer>[] = [];
+    let size = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > maxBytes) {
+          await reader.cancel();
+          throw new PreviewTooLargeError();
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return new Blob(chunks, { type: res.headers.get("Content-Type") ?? "" });
   }
 
   // Projects

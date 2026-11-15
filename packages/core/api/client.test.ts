@@ -3340,3 +3340,40 @@ describe("ApiClient shared credential across windows", () => {
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("bounded attachment blob downloads (MYA-1783)", () => {
+  it("rejects an oversized Content-Length without consuming the body", async () => {
+    const cancel = vi.fn();
+    const response = new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new Uint8Array(1)); },
+      pull(controller) { controller.close(); },
+      cancel,
+    }), { headers: { "Content-Length": "100" } });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    await expect(new ApiClient("https://api.example.test").getAttachmentBlob("att-1", 4)).rejects.toMatchObject({ name: "PreviewTooLargeError" });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it.each([undefined, "1"])("bounds streamed bytes with Content-Length %s", async (length) => {
+    const cancel = vi.fn();
+    let count = 0;
+    const response = new Response(new ReadableStream({
+      pull(controller) {
+        if (count === 3) controller.close();
+        else { controller.enqueue(new Uint8Array(3)); count++; }
+      },
+      cancel,
+    }), { headers: length ? { "Content-Length": length } : {} });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    await expect(new ApiClient("https://api.example.test").getAttachmentBlob("att-1", 4)).rejects.toMatchObject({ name: "PreviewTooLargeError" });
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(count).toBeLessThanOrEqual(3);
+  });
+
+  it("preserves content type and accepts bytes exactly at the bound", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("1234", { headers: { "Content-Type": "video/mp4" } })));
+    const blob = await new ApiClient("https://api.example.test").getAttachmentBlob("att-1", 4);
+    expect(blob.size).toBe(4);
+    expect(blob.type).toBe("video/mp4");
+  });
+});

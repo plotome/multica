@@ -35,6 +35,7 @@ const {
   getAttachmentTextContentMock,
   getAttachmentMock,
   downloadMock,
+  getAttachmentBlobMock,
   getBaseUrlMock,
   FakePreviewTooLargeError,
   FakePreviewUnsupportedError,
@@ -57,6 +58,7 @@ const {
     // upgrade to, so the picked URL stands.
     getAttachmentMock: vi.fn((): Promise<Attachment> => Promise.reject(new Error("no re-sign"))),
     downloadMock: vi.fn(),
+    getAttachmentBlobMock: vi.fn(),
     // Default to the web shape (empty base, same-origin). Tests covering
     // the desktop-renderer / standalone-shell case override per-test.
     getBaseUrlMock: vi.fn(() => ""),
@@ -69,6 +71,7 @@ vi.mock("@multica/core/api", () => ({
   api: {
     getAttachmentTextContent: getAttachmentTextContentMock,
     getAttachment: getAttachmentMock,
+    getAttachmentBlob: getAttachmentBlobMock,
     getBaseUrl: getBaseUrlMock,
   },
   PreviewTooLargeError: FakePreviewTooLargeError,
@@ -176,6 +179,7 @@ import {
   AttachmentPreviewStandalone,
   useAttachmentPreview,
 } from "./attachment-preview-modal";
+import { __resetInlineMediaBlobCacheForTests } from "./hooks/use-inline-media-url";
 import { withFragmentNavShim } from "./utils/iframe-fragment-nav";
 import { withWidthBridge } from "./utils/iframe-width-bridge";
 import { withLocationBridge } from "./utils/iframe-location-bridge";
@@ -224,6 +228,8 @@ function ClosablePreview({ attachment }: { attachment: Attachment }) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  __resetInlineMediaBlobCacheForTests();
+  getAttachmentBlobMock.mockReset();
   downloadMock.mockReset();
   // Drops any body a test queued but never consumed (a media kind skips the
   // text fetch), so it cannot answer the next test's request.
@@ -1566,5 +1572,84 @@ describe("AttachmentPreviewModal — tables", () => {
     const table = await screen.findByTestId("table-preview");
     expect(table.querySelector("th[data-column-id='c0']")?.textContent).toBe("name");
     expect(table.querySelector("th[data-column-id='c1']")?.textContent).toBe("count");
+  });
+});
+
+describe("authenticated audio/video previews (MYA-1783)", () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  const cases = [["video", "clip.mp4", "video/mp4"], ["audio", "clip.mp3", "audio/mpeg"]] as const;
+  function media(filename: string, content_type: string) {
+    getBaseUrlMock.mockReturnValue("https://api.example.test");
+    return makeAttachment({ id, filename, content_type, size_bytes: 12889061,
+      download_url: `/api/attachments/${id}/download` });
+  }
+
+  it.each(cases)("waits then uses a signed URL for %s", async (tag, filename, type) => {
+    const att = media(filename, type);
+    let resolve!: (att: Attachment) => void;
+    getAttachmentMock.mockImplementationOnce(() => new Promise<Attachment>((r) => { resolve = r; }));
+    render(<AttachmentPreviewModal source={{ kind: "full", attachment: att }} open onClose={() => {}} />);
+    expect(document.querySelector(tag)?.getAttribute("src") ?? null).toBeNull();
+    await act(async () => { resolve({ ...att, download_url: "https://cdn.example.test/fresh" }); });
+    await waitFor(() => expect(document.querySelector(tag)?.getAttribute("src")).toBe("https://cdn.example.test/fresh"));
+    expect(getAttachmentBlobMock).not.toHaveBeenCalled();
+  });
+
+  it.each(cases)("uses authenticated bytes in proxy mode for %s", async (tag, filename, type) => {
+    const att = media(filename, type);
+    getAttachmentMock.mockResolvedValueOnce({ ...att, download_url: `/api/attachments/${id}/signed-download?exp=123&sig=test` });
+    let resolve!: (blob: Blob) => void;
+    getAttachmentBlobMock.mockImplementationOnce(() => new Promise<Blob>((r) => { resolve = r; }));
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, writable: true, value: vi.fn(() => "blob:authenticated-media") });
+    render(<AttachmentPreviewModal source={{ kind: "full", attachment: att }} open onClose={() => {}} />);
+    await waitFor(() => expect(getAttachmentBlobMock).toHaveBeenCalled());
+    expect(document.querySelector(tag)?.getAttribute("src") ?? null).toBeNull();
+    await act(async () => { resolve(new Blob(["media"], { type })); });
+    await waitFor(() => expect(document.querySelector(tag)?.getAttribute("src")).toBe("blob:authenticated-media"));
+    expect(getAttachmentBlobMock).toHaveBeenCalledWith(id, 32 * 1024 * 1024);
+  });
+
+  it("allows oversized media when storage provides a signed streaming URL", async () => {
+    const att = { ...media("large.mp4", "video/mp4"), size_bytes: 300 * 1024 * 1024 };
+    getAttachmentMock.mockResolvedValueOnce({ ...att, download_url: "https://cdn.example.test/large.mp4?Signature=fresh" });
+    render(<AttachmentPreviewModal source={{ kind: "full", attachment: att }} open onClose={() => {}} />);
+    await waitFor(() => expect(document.querySelector("video")?.getAttribute("src")).toBe("https://cdn.example.test/large.mp4?Signature=fresh"));
+    expect(getAttachmentBlobMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized proxy media before downloading bytes", async () => {
+    const att = { ...media("large.mp4", "video/mp4"), size_bytes: 300 * 1024 * 1024 };
+    getAttachmentMock.mockResolvedValueOnce(att);
+    render(<AttachmentPreviewModal source={{ kind: "full", attachment: att }} open onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("File is too large to preview. Please download.")).toBeInTheDocument());
+    expect(getAttachmentBlobMock).not.toHaveBeenCalled();
+    expect(document.querySelector("video")).toBeNull();
+  });
+
+  it("does not re-sign same-origin cookie-authenticated media", () => {
+    const att = media("clip.mp4", "video/mp4");
+    getBaseUrlMock.mockReturnValue("");
+    render(<AttachmentPreviewModal source={{ kind: "full", attachment: att }} open onClose={() => {}} />);
+    expect(document.querySelector("video")?.getAttribute("src")).toBe(att.download_url);
+    expect(getAttachmentMock).not.toHaveBeenCalled();
+    expect(getAttachmentBlobMock).not.toHaveBeenCalled();
+  });
+
+  it("shows a download fallback when metadata authentication fails", async () => {
+    const att = media("clip.mp4", "video/mp4");
+    getAttachmentMock.mockRejectedValueOnce(new Error("unauthorized"));
+    render(<AttachmentPreviewModal source={{ kind: "full", attachment: att }} open onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Couldn't load preview")).toBeInTheDocument());
+    expect(document.querySelector("video")).toBeNull();
+    expect(getAttachmentBlobMock).not.toHaveBeenCalled();
+  });
+
+  it("shows a download fallback when authenticated bytes fail", async () => {
+    const att = media("clip.mp4", "video/mp4");
+    getAttachmentMock.mockResolvedValueOnce(att);
+    getAttachmentBlobMock.mockRejectedValueOnce(new Error("download failed"));
+    render(<AttachmentPreviewModal source={{ kind: "full", attachment: att }} open onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Couldn't load preview")).toBeInTheDocument());
+    expect(document.querySelector("video")).toBeNull();
   });
 });

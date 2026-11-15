@@ -11,7 +11,7 @@
 
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "@multica/core/api";
+import { api, PreviewTooLargeError } from "@multica/core/api";
 import { attachmentIdFromDownloadURL } from "@multica/core/types/attachment-url";
 
 // Keep refetches well inside the server's signed-URL TTL (30 min default,
@@ -26,6 +26,9 @@ const RESIGN_STALE_MS = 20 * 60 * 1000;
 // through an image-heavy thread from pinning every decoded screenshot in
 // renderer memory forever.
 export const INLINE_BLOB_GC_MS = 5 * 60 * 1000;
+
+// Explicit renderer memory budget for buffered audio/video previews.
+export const MEDIA_PREVIEW_MAX_BYTES = 32 * 1024 * 1024;
 
 // Module-level cache for blob: URLs keyed by attachment id. Without this,
 // useObjectURL creates a new object URL on every mount (state "" -> effect
@@ -62,17 +65,18 @@ export function __resetInlineMediaBlobCacheForTests(): void {
 // the response's signed `download_url`.
 //
 // The server only has a signed URL to offer under CloudFront signing or
-// presign mode. In **proxy** download mode `GetAttachmentByID` hands back the
-// auth-gated API path again, and before MUL-5445 the renderer simply kept the
+// presign mode. Proxy mode may return a relative, 60-second download
+// capability, but that is shorter than this metadata cache's lifetime and a
+// media player's later range requests. Buffer authenticated bytes instead.
+// Before MUL-5445 the renderer simply kept the
 // original URL — the image stayed broken and the metadata request was pure
 // overhead. Proxy is not an exotic setting: the default `auto` mode forces it
 // whenever the storage URL points at an internal host, which is exactly the
 // docker-compose MinIO (`http://minio:9000`) self-host shape. So when the
-// refreshed metadata confirms there is no signed URL, fall back to pulling the
-// bytes through the authenticated client and rendering them from an object
-// URL. `blobFallback` gates that on the caller actually rendering a native
-// `<img>`: a file card only needs a link, and downloading a 100 MB archive
-// into renderer memory to draw a chip would be a bad trade.
+// refreshed metadata has no signed storage URL, pull bytes through the
+// authenticated client and render them from an object URL. `blobFallback` gates that on the caller actually rendering native
+// media (audio/video callers also pass a byte budget). A file card only needs
+// a link; downloading a 100 MB archive to draw a chip would be a bad trade.
 //
 // `pending` is true while that upgrade is still in flight — `url` is then the
 // picked URL, which this client may be unable to load. A caller that treats a
@@ -82,7 +86,8 @@ export function useResignedInlineMedia(
   attachmentId: string | undefined,
   pickedUrl: string,
   blobFallback: boolean,
-): { url: string; pending: boolean } {
+  maxBlobBytes?: number,
+): { url: string; pending: boolean; error?: Error } {
   const idFromPickedUrl = attachmentIdFromDownloadURL(pickedUrl);
   const resignAttachmentId = attachmentId ?? idFromPickedUrl;
   const isCrossOriginWebURL = (() => {
@@ -122,9 +127,16 @@ export function useResignedInlineMedia(
   // Only after `fresh` has landed do we know this deployment has nothing
   // signed to give — firing the byte fetch earlier would double-download on
   // every CloudFront / presign client.
-  const { data: blob, isError: blobFailed } = useQuery({
-    queryKey: ["attachment-inline-blob", resignAttachmentId],
-    queryFn: () => api.getAttachmentBlob(resignAttachmentId as string),
+  const { data: blob, isError: blobFailed, error: blobError } = useQuery({
+    queryKey: ["attachment-inline-blob", resignAttachmentId, maxBlobBytes ?? null],
+    queryFn: () => {
+      if (maxBlobBytes !== undefined && (fresh?.size_bytes ?? 0) > maxBlobBytes) {
+        throw new PreviewTooLargeError();
+      }
+      return maxBlobBytes === undefined
+        ? api.getAttachmentBlob(resignAttachmentId as string)
+        : api.getAttachmentBlob(resignAttachmentId as string, maxBlobBytes);
+    },
     enabled: needsResign && blobFallback && !!fresh && signedUrl === "",
     staleTime: Infinity,
     gcTime: INLINE_BLOB_GC_MS,
@@ -154,7 +166,11 @@ export function useResignedInlineMedia(
   // renders the bytes — while they are. A failure at either step ends the
   // wait on the picked URL.
   const pending = !freshFailed && (!fresh || (blobFallback && !blobFailed));
-  return { url: pickedUrl, pending };
+  return {
+    url: pickedUrl,
+    pending,
+    error: freshFailed ? new Error("Attachment metadata unavailable") : (blobError ?? undefined),
+  };
 }
 
 // useObjectURL turns a Blob into a `blob:` URL. The module cache keeps the

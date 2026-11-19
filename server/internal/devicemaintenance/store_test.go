@@ -1,7 +1,11 @@
 package devicemaintenance
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -327,5 +331,65 @@ func TestDeviceMaintenanceReleaseHistoryRespectsReownedIdentity(t *testing.T) {
 	observed := must(t, s, device, other, "status", Request{})
 	if observed.Lease != "" || observed.Generation != "" || observed.Digest != "" {
 		t.Fatal("another owner's release history leaked through reused daemon ID")
+	}
+}
+
+func TestDeviceMaintenanceSurvivesHTTPServerAndPoolRestart(t *testing.T) {
+	pool, fx, device, _ := fixture(t)
+	ctx := context.Background()
+	serve := func(db Database) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			(Store{db}).Serve(w, r, device, fx.UserID, strings.TrimPrefix(r.URL.Path, "/"))
+		}))
+	}
+	call := func(server *httptest.Server, action string, binding *Request) State {
+		t.Helper()
+		var response *http.Response
+		var err error
+		if binding == nil {
+			response, err = http.Get(server.URL + "/" + action)
+		} else {
+			raw, _ := json.Marshal(binding)
+			response, err = http.Post(server.URL+"/"+action, "application/json", bytes.NewReader(raw))
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != 200 {
+			t.Fatal(action, response.StatusCode)
+		}
+		var state State
+		if err = json.NewDecoder(response.Body).Decode(&state); err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	initial, err := pgxpool.NewWithConfig(ctx, pool.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer initial.Close()
+	before := serve(initial)
+	defer before.Close()
+	req := request()
+	frozen := call(before, "acquire", &req)
+	before.Close()
+	initial.Close()
+	fresh, err := pgxpool.NewWithConfig(ctx, pool.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	after := serve(fresh)
+	defer after.Close()
+	persisted := call(after, "status", nil)
+	if !persisted.Frozen || persisted.Generation != frozen.Generation || persisted.Lease != frozen.Lease {
+		t.Fatal("server/pool restart lost durable fence")
+	}
+	bound := binding(frozen)
+	call(after, "drain", &bound)
+	if call(after, "release", &bound).Frozen {
+		t.Fatal("restarted server did not release the exact lease")
 	}
 }

@@ -12,16 +12,24 @@ import (
 // This models the release tools' idempotent disk transaction, separately from
 // the orchestrator journal, so process restarts cannot erase observed state.
 type diskDriver struct {
-	root         string
-	probe        Probe
-	failInstall  bool
-	failVerify   bool
-	failRollback bool
-	installCalls int
-	afterInstall func()
+	root               string
+	probe              Probe
+	failInstall        bool
+	failVerify         bool
+	failRollback       bool
+	probeErr           bool
+	failRollbackVerify bool
+	rollbackCalls      int
+	installCalls       int
+	afterInstall       func()
 }
 
-func (d *diskDriver) Probe(context.Context, Target) (Probe, error) { return d.probe, nil }
+func (d *diskDriver) Probe(context.Context, Target) (Probe, error) {
+	if d.probeErr {
+		return Probe{}, errors.New("injected probe failure")
+	}
+	return d.probe, nil
+}
 func (d *diskDriver) Install(_ context.Context, target Target) error {
 	d.installCalls++
 	if d.failInstall {
@@ -49,12 +57,16 @@ func (d *diskDriver) Verify(_ context.Context, target Target) error {
 	return nil
 }
 func (d *diskDriver) Rollback(_ context.Context, target Target) error {
+	d.rollbackCalls++
 	if d.failRollback {
 		return errors.New("injected rollback interruption")
 	}
 	return os.WriteFile(filepath.Join(d.root, target.Artifact.ID), []byte(target.Baseline.Commit), 0600)
 }
 func (d *diskDriver) VerifyRollback(_ context.Context, target Target) error {
+	if d.failRollbackVerify {
+		return errors.New("injected rollback verification failure")
+	}
 	data, err := os.ReadFile(filepath.Join(d.root, target.Artifact.ID))
 	if err != nil {
 		return err
@@ -76,7 +88,7 @@ func journalFixture(t *testing.T) (Journal, *diskDriver) {
 	if err := j.Create(r); err != nil {
 		t.Fatal(err)
 	}
-	return j, &diskDriver{root: t.TempDir(), probe: Probe{Online: true}}
+	return j, &diskDriver{root: t.TempDir(), probe: Probe{Online: true, RollbackAvailable: true}}
 }
 
 func approveFixture(t *testing.T, j Journal) {
@@ -125,7 +137,7 @@ func TestRolloutApprovalBusyOfflineFailureResumeAndRollback(t *testing.T) {
 	}
 	// A new Journal instance represents coordinator restart; approval survives.
 	j = Journal{Path: j.Path}
-	d.probe = Probe{Online: true}
+	d.probe = Probe{Online: true, RollbackAvailable: true}
 	for _, id := range []string{"mini-server", "mini-cli"} {
 		if err := j.Advance(ctx, id, "mini", d); err != nil {
 			t.Fatal(err)
@@ -164,11 +176,14 @@ func TestRolloutApprovalBusyOfflineFailureResumeAndRollback(t *testing.T) {
 	if err := j.Advance(ctx, "air-desktop", "air", d); err == nil {
 		t.Fatal("rollback failure hidden")
 	}
-	if phaseFixture(t, j, "air-desktop") != RollingBack {
+	if phaseFixture(t, j, "air-desktop") != Failed {
 		t.Fatal("lost rollback direction")
 	}
 	d.failRollback = false
 	j = Journal{Path: j.Path}
+	if err := j.Retry("air-desktop"); err != nil {
+		t.Fatal(err)
+	}
 	if err := j.Advance(ctx, "air-desktop", "air", d); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +273,7 @@ func TestUnknownStateAndCorruptReceiptCannotComplete(t *testing.T) {
 func TestProcessDeathReleasesLockAndResumesDiskTransaction(t *testing.T) {
 	if path := os.Getenv("FORK_UPDATE_CRASH_RECEIPT"); path != "" {
 		j := Journal{Path: path}
-		d := &diskDriver{root: os.Getenv("FORK_UPDATE_CRASH_DISK"), probe: Probe{Online: true}, afterInstall: func() { os.Exit(73) }}
+		d := &diskDriver{root: os.Getenv("FORK_UPDATE_CRASH_DISK"), probe: Probe{Online: true, RollbackAvailable: true}, afterInstall: func() { os.Exit(73) }}
 		_ = j.Advance(context.Background(), "mini-server", "mini", d)
 		os.Exit(74)
 	}
@@ -282,5 +297,108 @@ func TestProcessDeathReleasesLockAndResumesDiskTransaction(t *testing.T) {
 	}
 	if phaseFixture(t, j, "mini-server") != Succeeded {
 		t.Fatal("restarted worker did not verify")
+	}
+}
+
+func TestRollbackProbeErrorAcrossProcessRestart(t *testing.T) {
+	if path := os.Getenv("FORK_UPDATE_ROLLBACK_PROBE_RECEIPT"); path != "" {
+		d := &diskDriver{probeErr: true}
+		if err := (Journal{Path: path}).Advance(context.Background(), "mini-server", "mini", d); err == nil {
+			t.Fatal("probe failure hidden")
+		}
+		return
+	}
+	j, d := journalFixture(t)
+	approveFixture(t, j)
+	if err := j.Advance(context.Background(), "mini-server", "mini", d); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.RequestRollback("mini-server"); err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(os.Args[0], "-test.run=^TestRollbackProbeErrorAcrossProcessRestart$")
+	child.Env = append(os.Environ(), "FORK_UPDATE_ROLLBACK_PROBE_RECEIPT="+j.Path)
+	if output, err := child.CombinedOutput(); err != nil {
+		t.Fatalf("probe process: %s: %v", output, err)
+	}
+	j = Journal{Path: j.Path}
+	r, err := j.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := r.Targets["mini-server"]
+	if target.Operation != "rollback" || target.FailureStage != "probe" || target.ResumePhase != RollingBack {
+		t.Fatalf("lost failure direction: %#v", target)
+	}
+	if err := j.Retry("mini-server"); err != nil {
+		t.Fatal(err)
+	}
+	before := d.installCalls
+	if err := j.Advance(context.Background(), "mini-server", "mini", d); err != nil {
+		t.Fatal(err)
+	}
+	if d.installCalls != before {
+		t.Fatal("rollback recovery called Install and reinstalled candidate")
+	}
+	if phaseFixture(t, j, "mini-server") != RolledBack {
+		t.Fatal("rollback direction was lost")
+	}
+}
+
+func TestRollbackFailuresRequireExplicitDirectionPreservingRetry(t *testing.T) {
+	for _, stage := range []string{"rollback", "rollback-verification"} {
+		t.Run(stage, func(t *testing.T) {
+			j, d := journalFixture(t)
+			approveFixture(t, j)
+			if err := j.Advance(context.Background(), "mini-server", "mini", d); err != nil {
+				t.Fatal(err)
+			}
+			if err := j.RequestRollback("mini-server"); err != nil {
+				t.Fatal(err)
+			}
+			d.failRollback = stage == "rollback"
+			d.failRollbackVerify = stage == "rollback-verification"
+			if err := j.Advance(context.Background(), "mini-server", "mini", d); err == nil {
+				t.Fatal("failure hidden")
+			}
+			r, _ := j.Read()
+			target := r.Targets["mini-server"]
+			if target.Phase != Failed || target.Operation != "rollback" || target.FailureStage != stage {
+				t.Fatalf("wrong failure: %#v", target)
+			}
+			calls := d.rollbackCalls
+			d.failRollback = false
+			d.failRollbackVerify = false
+			if err := j.Advance(context.Background(), "mini-server", "mini", d); err != nil {
+				t.Fatal(err)
+			}
+			if d.rollbackCalls != calls || phaseFixture(t, j, "mini-server") != Failed {
+				t.Fatal("retried without explicit action")
+			}
+			if err := j.Retry("mini-server"); err != nil {
+				t.Fatal(err)
+			}
+			if err := j.Advance(context.Background(), "mini-server", "mini", d); err != nil {
+				t.Fatal(err)
+			}
+			if d.installCalls != 1 || phaseFixture(t, j, "mini-server") != RolledBack {
+				t.Fatal("recovery installed candidate")
+			}
+			if stage == "rollback-verification" && d.rollbackCalls != calls {
+				t.Fatal("verification retry repeated rollback")
+			}
+		})
+	}
+}
+
+func TestRollbackRequiresAdapterAttestedBaseline(t *testing.T) {
+	j, d := journalFixture(t)
+	approveFixture(t, j)
+	d.probe.RollbackAvailable = false
+	if err := j.Advance(context.Background(), "mini-server", "mini", d); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.RequestRollback("mini-server"); err == nil {
+		t.Fatal("unavailable baseline allowed rollback")
 	}
 }

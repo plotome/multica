@@ -2473,6 +2473,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// Runtimes
 			r.Get("/api/fork-updates", h.GetForkUpdate)
 			r.With(handler.RequireHumanActor).Post("/api/fork-updates/action", h.ActOnForkUpdate)
+			r.With(handler.RequireHumanActor).Get("/api/device-maintenance/{daemonId}/{action}", h.DeviceMaintenance)
+			r.With(handler.RequireHumanActor).Post("/api/device-maintenance/{daemonId}/{action}", h.DeviceMaintenance)
 			r.Route("/api/runtimes", func(r chi.Router) {
 				r.Get("/", h.ListAgentRuntimes)
 				r.Route("/{runtimeId}", func(r chi.Router) {

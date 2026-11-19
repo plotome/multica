@@ -1669,6 +1669,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/runtimes/{runtimeId}/tasks/{taskId}/skill-bundles/resolve", h.ResolveTaskSkillBundles)
 		r.Get("/runtimes/{runtimeId}/tasks/pending", h.ListPendingTasksByRuntime)
 		r.Post("/runtimes/{runtimeId}/update/{updateId}/result", h.ReportUpdateResult)
+		r.Get("/runtimes/{runtimeId}/fork-update", h.GetForkUpdateForConsumer)
+		r.Post("/runtimes/{runtimeId}/fork-update/report", h.ReportForkUpdate)
 		r.Post("/runtimes/{runtimeId}/models/{requestId}/result", h.ReportModelListResult)
 		r.Post("/runtimes/{runtimeId}/local-skills/{requestId}/result", h.ReportLocalSkillListResult)
 		r.Post("/runtimes/{runtimeId}/local-skills/import/{requestId}/result", h.ReportLocalSkillImportResult)
@@ -2468,6 +2470,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			})
 
 			// Runtimes
+			r.Get("/api/fork-updates", h.GetForkUpdate)
+			r.With(handler.RequireHumanActor).Post("/api/fork-updates/action", h.ActOnForkUpdate)
 			r.Route("/api/runtimes", func(r chi.Router) {
 				r.Get("/", h.ListAgentRuntimes)
 				r.Route("/{runtimeId}", func(r chi.Router) {

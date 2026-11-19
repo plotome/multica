@@ -18,16 +18,17 @@ import (
 )
 
 type Artifact struct {
-	ID       string `json:"id"`
-	Host     string `json:"host"`
-	Kind     string `json:"kind"`
-	Platform string `json:"platform"`
-	Arch     string `json:"arch"`
-	Version  string `json:"version"`
-	Commit   string `json:"commit"`
-	URL      string `json:"url"`
-	SHA256   string `json:"sha256"`
-	Bytes    int64  `json:"bytes"`
+	ID                string            `json:"id"`
+	Host              string            `json:"host"`
+	Kind              string            `json:"kind"`
+	Platform          string            `json:"platform"`
+	Arch              string            `json:"arch"`
+	Version           string            `json:"version"`
+	Commit            string            `json:"commit"`
+	URL               string            `json:"url"`
+	SHA256            string            `json:"sha256"`
+	Bytes             int64             `json:"bytes"`
+	ComponentVersions map[string]string `json:"component_versions"`
 }
 
 type Catalog struct {
@@ -99,7 +100,7 @@ func VerifyCatalog(data []byte, policy Policy) (VerifiedCatalog, error) {
 	if err != nil || origin.Scheme != "https" || origin.Host == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || (origin.Path != "" && origin.Path != "/") {
 		return out, errors.New("policy requires an HTTPS artifact origin")
 	}
-	if policy.Channel == "" || out.Schema != 1 || out.Channel != policy.Channel || out.Sequence == 0 || len(out.Artifacts) == 0 {
+	if policy.Channel == "" || out.Schema != 1 || out.Channel != policy.Channel || out.Sequence == 0 || out.Sequence > math.MaxInt64 || len(out.Artifacts) == 0 {
 		return out, errors.New("wrong schema, channel or empty candidate")
 	}
 	seen := map[string]bool{}
@@ -115,6 +116,15 @@ func VerifyCatalog(data []byte, policy Policy) (VerifiedCatalog, error) {
 			return out, fmt.Errorf("unsupported artifact %q", a.ID)
 		}
 		seen[a.ID] = true
+		expected := ExpectedComponents(a.Kind)
+		if len(a.ComponentVersions) != len(expected) {
+			return out, fmt.Errorf("artifact %q has incomplete component versions", a.ID)
+		}
+		for _, kind := range expected {
+			if a.ComponentVersions[kind] == "" {
+				return out, fmt.Errorf("artifact %q is missing version for %s", a.ID, kind)
+			}
+		}
 	}
 	hash := sha256.Sum256(payload)
 	out.Digest = hex.EncodeToString(hash[:])

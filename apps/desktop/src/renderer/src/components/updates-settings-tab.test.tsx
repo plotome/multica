@@ -53,6 +53,8 @@ vi.mock("sonner", () => ({
   },
 }));
 
+vi.mock("./coordinated-updates-panel",()=>({CoordinatedUpdatesPanel:()=> <div>Coordinated Fork updates</div>}));
+
 import { UpdatesSettingsTab } from "./updates-settings-tab";
 
 describe("UpdatesSettingsTab", () => {
@@ -79,10 +81,10 @@ describe("UpdatesSettingsTab", () => {
     });
   });
 
-  it("shows manual maintenance without an automatic switch or check button", async () => {
+  it("wires the coordinated Fork panel without official automatic update controls", async () => {
     mocks.getPreferences.mockResolvedValue({ automaticUpdates: false, mode: "manual" });
     render(<UpdatesSettingsTab />);
-    expect(await screen.findByText("Manual updates")).toBeInTheDocument();
+    expect(await screen.findByText("Coordinated Fork updates")).toBeInTheDocument();
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Check now" })).not.toBeInTheDocument();
     expect(mocks.checkForUpdates).not.toHaveBeenCalled();

@@ -19,6 +19,12 @@ func catalogFixture() Catalog {
 	cli.ID, cli.Kind, cli.Platform = "mini-cli", "cli-daemon", "darwin"
 	desktop := base
 	desktop.ID, desktop.Host, desktop.Kind, desktop.Platform = "air-desktop", "air", "desktop", "darwin"
+	for _, artifact := range []*Artifact{&base, &cli, &desktop} {
+		artifact.ComponentVersions = map[string]string{}
+		for _, kind := range ExpectedComponents(artifact.Kind) {
+			artifact.ComponentVersions[kind] = artifact.Version
+		}
+	}
 	return Catalog{Schema: 1, Channel: "selfhost", Sequence: 2, Artifacts: []Artifact{base, cli, desktop}}
 }
 

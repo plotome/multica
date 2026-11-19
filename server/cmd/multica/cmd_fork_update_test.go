@@ -21,6 +21,7 @@ func TestForkUpdateCLIPlansOnlyVerifiedCandidate(t *testing.T) {
 		t.Fatal(err)
 	}
 	artifact := forkupdate.Artifact{ID: "desktop", Host: "client", Kind: "desktop", Platform: "darwin", Arch: "arm64", Version: "0.8.1-fork.2", Commit: strings.Repeat("b", 40), URL: "https://updates.example/package", SHA256: strings.Repeat("a", 64), Bytes: 1}
+	artifact.ComponentVersions = map[string]string{"desktop": artifact.Version, "cli": artifact.Version, "daemon": artifact.Version}
 	payload, _ := json.Marshal(forkupdate.Catalog{Schema: 1, Channel: "selfhost", Sequence: 2, Artifacts: []forkupdate.Artifact{artifact}})
 	envelope, _ := json.Marshal(forkupdate.Envelope{Payload: base64.StdEncoding.EncodeToString(payload), Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(private, payload))})
 	keyPath, catalogPath := filepath.Join(dir, "public-key"), filepath.Join(dir, "catalog.json")

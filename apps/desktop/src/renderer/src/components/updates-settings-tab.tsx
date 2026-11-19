@@ -5,6 +5,7 @@ import { Switch } from "@multica/ui/components/ui/switch";
 import { useT } from "@multica/views/i18n";
 import { SettingsCard, SettingsRow, SettingsTab } from "@multica/views/settings";
 import { toast } from "sonner";
+import { CoordinatedUpdatesPanel } from "./coordinated-updates-panel";
 
 type CheckState =
   | { status: "idle" }
@@ -89,10 +90,7 @@ export function UpdatesSettingsTab() {
         </SettingsRow>
 
         {manualMode ? (
-          <SettingsRow
-            label={t(($) => $.desktop.updates.manual_updates_title)}
-            description={t(($) => $.desktop.updates.manual_updates_description)}
-          >{null}</SettingsRow>
+          <CoordinatedUpdatesPanel />
         ) : (
           <>
             <SettingsRow

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // This models the release tools' idempotent disk transaction, separately from
@@ -43,18 +44,25 @@ func (d *diskDriver) Install(_ context.Context, target Target) error {
 	}
 	return nil
 }
-func (d *diskDriver) Verify(_ context.Context, target Target) error {
+func fixtureObservation(target Target, commit string) Observation {
+	o := Observation{At: time.Now().UTC().Format(time.RFC3339Nano)}
+	for _, kind := range ExpectedComponents(target.Artifact.Kind) {
+		o.Components = append(o.Components, InstalledComponent{Kind: kind, Version: "fixture", Commit: commit})
+	}
+	return o
+}
+func (d *diskDriver) Verify(_ context.Context, target Target) (Observation, error) {
 	if d.failVerify {
-		return errors.New("running identity mismatch")
+		return Observation{}, errors.New("running identity mismatch")
 	}
 	data, err := os.ReadFile(filepath.Join(d.root, target.Artifact.ID))
 	if err != nil {
-		return err
+		return Observation{}, err
 	}
 	if string(data) != target.Artifact.Commit {
-		return errors.New("wrong running commit")
+		return Observation{}, errors.New("wrong running commit")
 	}
-	return nil
+	return fixtureObservation(target, target.Artifact.Commit), nil
 }
 func (d *diskDriver) Rollback(_ context.Context, target Target) error {
 	d.rollbackCalls++
@@ -63,18 +71,18 @@ func (d *diskDriver) Rollback(_ context.Context, target Target) error {
 	}
 	return os.WriteFile(filepath.Join(d.root, target.Artifact.ID), []byte(target.Baseline.Commit), 0600)
 }
-func (d *diskDriver) VerifyRollback(_ context.Context, target Target) error {
+func (d *diskDriver) VerifyRollback(_ context.Context, target Target) (Observation, error) {
 	if d.failRollbackVerify {
-		return errors.New("injected rollback verification failure")
+		return Observation{}, errors.New("injected rollback verification failure")
 	}
 	data, err := os.ReadFile(filepath.Join(d.root, target.Artifact.ID))
 	if err != nil {
-		return err
+		return Observation{}, err
 	}
 	if string(data) != target.Baseline.Commit {
-		return errors.New("wrong rollback identity")
+		return Observation{}, errors.New("wrong rollback identity")
 	}
-	return nil
+	return fixtureObservation(target, target.Baseline.Commit), nil
 }
 
 func journalFixture(t *testing.T) (Journal, *diskDriver) {
@@ -84,7 +92,7 @@ func journalFixture(t *testing.T) (Journal, *diskDriver) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	j := Journal{Path: filepath.Join(t.TempDir(), "receipt.json")}
+	j := Journal{Path: filepath.Join(t.TempDir(), "receipt.json"), LockDir: t.TempDir()}
 	if err := j.Create(r); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +144,7 @@ func TestRolloutApprovalBusyOfflineFailureResumeAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A new Journal instance represents coordinator restart; approval survives.
-	j = Journal{Path: j.Path}
+	j = Journal{Path: j.Path, LockDir: j.LockDir}
 	d.probe = Probe{Online: true, RollbackAvailable: true}
 	for _, id := range []string{"mini-server", "mini-cli"} {
 		if err := j.Advance(ctx, id, "mini", d); err != nil {
@@ -180,7 +188,7 @@ func TestRolloutApprovalBusyOfflineFailureResumeAndRollback(t *testing.T) {
 		t.Fatal("lost rollback direction")
 	}
 	d.failRollback = false
-	j = Journal{Path: j.Path}
+	j = Journal{Path: j.Path, LockDir: j.LockDir}
 	if err := j.Retry("air-desktop"); err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +219,7 @@ func TestRecoverInterruptedInstallAndVerify(t *testing.T) {
 			if err := j.withLock(func() error { return j.save(r) }); err != nil {
 				t.Fatal(err)
 			}
-			j = Journal{Path: j.Path}
+			j = Journal{Path: j.Path, LockDir: j.LockDir}
 			d.installCalls = 0
 			if err := j.Advance(context.Background(), "mini-server", "mini", d); err != nil {
 				t.Fatal(err)
@@ -231,7 +239,7 @@ func TestVerificationFailureAndConcurrentInstallAreExplicit(t *testing.T) {
 	approveFixture(t, j)
 	d.afterInstall = func() {
 		// Separate Journal objects still share the OS lock.
-		other := Journal{Path: j.Path}
+		other := Journal{Path: j.Path, LockDir: j.LockDir}
 		if err := other.Advance(context.Background(), "mini-server", "mini", d); err == nil {
 			t.Error("concurrent installer acquired journal")
 		}
@@ -272,7 +280,7 @@ func TestUnknownStateAndCorruptReceiptCannotComplete(t *testing.T) {
 
 func TestProcessDeathReleasesLockAndResumesDiskTransaction(t *testing.T) {
 	if path := os.Getenv("FORK_UPDATE_CRASH_RECEIPT"); path != "" {
-		j := Journal{Path: path}
+		j := Journal{Path: path, LockDir: os.Getenv("FORK_UPDATE_HOST_LOCK_DIR")}
 		d := &diskDriver{root: os.Getenv("FORK_UPDATE_CRASH_DISK"), probe: Probe{Online: true, RollbackAvailable: true}, afterInstall: func() { os.Exit(73) }}
 		_ = j.Advance(context.Background(), "mini-server", "mini", d)
 		os.Exit(74)
@@ -280,7 +288,7 @@ func TestProcessDeathReleasesLockAndResumesDiskTransaction(t *testing.T) {
 	j, d := journalFixture(t)
 	approveFixture(t, j)
 	child := exec.Command(os.Args[0], "-test.run=^TestProcessDeathReleasesLockAndResumesDiskTransaction$")
-	child.Env = append(os.Environ(), "FORK_UPDATE_CRASH_RECEIPT="+j.Path, "FORK_UPDATE_CRASH_DISK="+d.root)
+	child.Env = append(os.Environ(), "FORK_UPDATE_CRASH_RECEIPT="+j.Path, "FORK_UPDATE_CRASH_DISK="+d.root, "FORK_UPDATE_HOST_LOCK_DIR="+j.LockDir)
 	err := child.Run()
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 73 {
@@ -289,10 +297,10 @@ func TestProcessDeathReleasesLockAndResumesDiskTransaction(t *testing.T) {
 	if phaseFixture(t, j, "mini-server") != Installing {
 		t.Fatal("install checkpoint was not durable before child died")
 	}
-	if err := d.Verify(context.Background(), Target{Artifact: catalogFixture().Artifacts[0]}); err != nil {
+	if _, err := d.Verify(context.Background(), Target{Artifact: catalogFixture().Artifacts[0]}); err != nil {
 		t.Fatal("child never switched the fixture", err)
 	}
-	if err := (Journal{Path: j.Path}).Advance(context.Background(), "mini-server", "mini", d); err != nil {
+	if err := (Journal{Path: j.Path, LockDir: j.LockDir}).Advance(context.Background(), "mini-server", "mini", d); err != nil {
 		t.Fatal("could not reconcile after process death", err)
 	}
 	if phaseFixture(t, j, "mini-server") != Succeeded {
@@ -303,7 +311,7 @@ func TestProcessDeathReleasesLockAndResumesDiskTransaction(t *testing.T) {
 func TestRollbackProbeErrorAcrossProcessRestart(t *testing.T) {
 	if path := os.Getenv("FORK_UPDATE_ROLLBACK_PROBE_RECEIPT"); path != "" {
 		d := &diskDriver{probeErr: true}
-		if err := (Journal{Path: path}).Advance(context.Background(), "mini-server", "mini", d); err == nil {
+		if err := (Journal{Path: path, LockDir: os.Getenv("FORK_UPDATE_HOST_LOCK_DIR")}).Advance(context.Background(), "mini-server", "mini", d); err == nil {
 			t.Fatal("probe failure hidden")
 		}
 		return
@@ -317,11 +325,11 @@ func TestRollbackProbeErrorAcrossProcessRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	child := exec.Command(os.Args[0], "-test.run=^TestRollbackProbeErrorAcrossProcessRestart$")
-	child.Env = append(os.Environ(), "FORK_UPDATE_ROLLBACK_PROBE_RECEIPT="+j.Path)
+	child.Env = append(os.Environ(), "FORK_UPDATE_ROLLBACK_PROBE_RECEIPT="+j.Path, "FORK_UPDATE_HOST_LOCK_DIR="+j.LockDir)
 	if output, err := child.CombinedOutput(); err != nil {
 		t.Fatalf("probe process: %s: %v", output, err)
 	}
-	j = Journal{Path: j.Path}
+	j = Journal{Path: j.Path, LockDir: j.LockDir}
 	r, err := j.Read()
 	if err != nil {
 		t.Fatal(err)
@@ -400,5 +408,29 @@ func TestRollbackRequiresAdapterAttestedBaseline(t *testing.T) {
 	}
 	if err := j.RequestRollback("mini-server"); err == nil {
 		t.Fatal("unavailable baseline allowed rollback")
+	}
+}
+
+func TestDifferentReceiptsCannotInstallSameHostConcurrently(t *testing.T) {
+	first, d := journalFixture(t)
+	approveFixture(t, first)
+	second, _ := journalFixture(t)
+	approveFixture(t, second)
+	second.LockDir = first.LockDir
+	d.afterInstall = func() {
+		other := &diskDriver{root: t.TempDir(), probe: Probe{Online: true}}
+		if err := second.Advance(context.Background(), "mini-cli", "mini", other); err == nil {
+			t.Error("second transaction bypassed host installation lock")
+		}
+		if other.installCalls != 0 {
+			t.Error("concurrent transaction installed")
+		}
+	}
+	if err := first.Advance(context.Background(), "mini-server", "mini", d); err != nil {
+		t.Fatal(err)
+	}
+	d.afterInstall = nil
+	if err := second.Advance(context.Background(), "mini-cli", "mini", d); err != nil {
+		t.Fatal("host lock not released", err)
 	}
 }

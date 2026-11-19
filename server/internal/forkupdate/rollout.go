@@ -13,6 +13,8 @@ type Phase string
 
 const (
 	Prepared          Phase = "prepared"
+	Downloading       Phase = "downloading"
+	Validating        Phase = "validating"
 	Waiting           Phase = "waiting"
 	Installing        Phase = "installing"
 	Verifying         Phase = "verifying"
@@ -32,14 +34,18 @@ type Baseline struct {
 }
 
 type Target struct {
-	Artifact          Artifact `json:"artifact"`
-	Baseline          Baseline `json:"baseline"`
-	Phase             Phase    `json:"phase"`
-	Error             string   `json:"error,omitempty"`
-	Operation         string   `json:"operation"`
-	FailureStage      string   `json:"failure_stage,omitempty"`
-	ResumePhase       Phase    `json:"resume_phase,omitempty"`
-	RollbackAvailable bool     `json:"rollback_available"`
+	Artifact          Artifact     `json:"artifact"`
+	Baseline          Baseline     `json:"baseline"`
+	Phase             Phase        `json:"phase"`
+	Error             string       `json:"error,omitempty"`
+	Log               string       `json:"log,omitempty"`
+	Operation         string       `json:"operation"`
+	FailureStage      string       `json:"failure_stage,omitempty"`
+	ResumePhase       Phase        `json:"resume_phase,omitempty"`
+	RollbackAvailable bool         `json:"rollback_available"`
+	PackageReady      bool         `json:"package_ready"`
+	Attempt           uint64       `json:"attempt"`
+	Observation       *Observation `json:"observation,omitempty"`
 }
 
 // Receipt is a local technical operation journal, not a replacement for the
@@ -67,7 +73,7 @@ func Plan(candidate VerifiedCatalog, installed map[string]Baseline) (Receipt, er
 		if _, duplicate := r.Targets[a.ID]; duplicate {
 			return r, fmt.Errorf("duplicate target %q", a.ID)
 		}
-		r.Targets[a.ID] = Target{Artifact: a, Baseline: b, Phase: Prepared, Operation: "install"}
+		r.Targets[a.ID] = Target{Artifact: a, Baseline: b, Phase: Prepared, Operation: "install", Attempt: 1}
 	}
 	return r, nil
 }
@@ -88,6 +94,7 @@ type Probe struct {
 	Online            bool
 	Busy              bool
 	RollbackAvailable bool
+	Observation       *Observation
 }
 
 // Driver implementations must use the existing host release tools. Install and
@@ -97,12 +104,18 @@ type Probe struct {
 type Driver interface {
 	Probe(context.Context, Target) (Probe, error)
 	Install(context.Context, Target) error
-	Verify(context.Context, Target) error
+	Verify(context.Context, Target) (Observation, error)
 	Rollback(context.Context, Target) error
-	VerifyRollback(context.Context, Target) error
+	VerifyRollback(context.Context, Target) (Observation, error)
 }
 
-type Journal struct{ Path string }
+type Journal struct {
+	Path string
+	// LockDir is a host-local policy path shared by all update generations.
+	// It must not be derived from a transaction ID or supplied by a catalog.
+	LockDir      string
+	OnCheckpoint func(Receipt)
+}
 
 func (j Journal) load() (Receipt, error) {
 	var r Receipt
@@ -140,7 +153,13 @@ func (j Journal) save(r Receipt) error {
 	if err := os.Rename(name, j.Path); err != nil {
 		return err
 	}
-	return syncDirectory(filepath.Dir(j.Path))
+	if err := syncDirectory(filepath.Dir(j.Path)); err != nil {
+		return err
+	}
+	if j.OnCheckpoint != nil {
+		j.OnCheckpoint(r)
+	}
+	return nil
 }
 
 func (j Journal) withLock(fn func() error) error {
@@ -201,6 +220,17 @@ func (j Journal) Approve(digest string) error {
 // the daemon must never own the process that will restart it. A failed target
 // requires Retry; disconnection and busy state retain approval indefinitely.
 func (j Journal) Advance(ctx context.Context, id, host string, driver Driver) error {
+	if !filepath.IsAbs(j.LockDir) || !idPattern.MatchString(host) {
+		return errors.New("a shared absolute host installation lock directory is required")
+	}
+	if err := os.MkdirAll(j.LockDir, 0700); err != nil {
+		return err
+	}
+	unlock, err := lockJournal(filepath.Join(j.LockDir, host+".lock"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return j.withLock(func() error {
 		r, err := j.load()
 		if err != nil {
@@ -216,7 +246,7 @@ func (j Journal) Advance(ctx context.Context, id, host string, driver Driver) er
 		switch t.Phase {
 		case Succeeded, Failed, RolledBack:
 			return nil
-		case Prepared, Waiting, Installing, Verifying, RollingBack, VerifyingRollback:
+		case Prepared, Downloading, Validating, Waiting, Installing, Verifying, RollingBack, VerifyingRollback:
 		default:
 			return fmt.Errorf("unknown target state %q", t.Phase)
 		}
@@ -227,6 +257,7 @@ func (j Journal) Advance(ctx context.Context, id, host string, driver Driver) er
 		}
 		fail := func(stage string, err error) error {
 			t.FailureStage, t.ResumePhase = stage, t.Phase
+			t.Log = err.Error()
 			if saveErr := persist(Failed, err.Error()); saveErr != nil {
 				return errors.Join(err, saveErr)
 			}
@@ -237,6 +268,9 @@ func (j Journal) Advance(ctx context.Context, id, host string, driver Driver) er
 			return fail("probe", err)
 		}
 		t.RollbackAvailable = probe.RollbackAvailable
+		if probe.Observation != nil {
+			t.Observation = probe.Observation
+		}
 		if !probe.Online || probe.Busy {
 			// Preserve interrupted install/verify/rollback checkpoints. Waiting
 			// is a pre-install state, never a reason to rerun a completed switch.
@@ -264,9 +298,14 @@ func (j Journal) Advance(ctx context.Context, id, host string, driver Driver) er
 					return err
 				}
 			}
-			if err := driver.VerifyRollback(ctx, t); err != nil {
+			observation, err := driver.VerifyRollback(ctx, t)
+			if err == nil {
+				err = observation.Validate(t.Artifact.Kind, t.Baseline.Commit)
+			}
+			if err != nil {
 				return fail("rollback-verification", err)
 			}
+			t.Observation = &observation
 			return persist(RolledBack, "")
 		}
 		if t.Operation != "install" {
@@ -283,9 +322,14 @@ func (j Journal) Advance(ctx context.Context, id, host string, driver Driver) er
 				return err
 			}
 		}
-		if err := driver.Verify(ctx, t); err != nil {
+		observation, err := driver.Verify(ctx, t)
+		if err == nil {
+			err = observation.Validate(t.Artifact.Kind, t.Artifact.Commit)
+		}
+		if err != nil {
 			return fail("running-verification", err)
 		}
+		t.Observation = &observation
 		return persist(Succeeded, "")
 	})
 }
@@ -296,27 +340,35 @@ func (j Journal) Retry(id string) error {
 		if err != nil {
 			return err
 		}
-		t, ok := r.Targets[id]
-		if !ok || t.Phase != Failed {
-			return errors.New("only a failed target can be retried")
+		if err := RetryTarget(&r, id); err != nil {
+			return err
 		}
-		switch t.Operation {
-		case "rollback":
-			if t.ResumePhase != RollingBack && t.ResumePhase != VerifyingRollback {
-				return errors.New("invalid rollback recovery checkpoint")
-			}
-		case "install":
-			if t.ResumePhase != Prepared && t.ResumePhase != Waiting && t.ResumePhase != Installing && t.ResumePhase != Verifying {
-				return errors.New("invalid install recovery checkpoint")
-			}
-		default:
-			return errors.New("unknown recovery operation")
-		}
-		t.Phase, t.Error = t.ResumePhase, ""
-		t.ResumePhase, t.FailureStage = "", ""
-		r.Targets[id] = t
 		return j.save(r)
 	})
+}
+
+func RetryTarget(r *Receipt, id string) error {
+	t, ok := r.Targets[id]
+	if !ok || t.Phase != Failed {
+		return errors.New("only a failed target can be retried")
+	}
+	switch t.Operation {
+	case "rollback":
+		if t.ResumePhase != RollingBack && t.ResumePhase != VerifyingRollback {
+			return errors.New("invalid rollback recovery checkpoint")
+		}
+	case "install":
+		if t.ResumePhase != Prepared && t.ResumePhase != Waiting && t.ResumePhase != Installing && t.ResumePhase != Verifying {
+			return errors.New("invalid install recovery checkpoint")
+		}
+	default:
+		return errors.New("unknown recovery operation")
+	}
+	t.Phase, t.Error = t.ResumePhase, ""
+	t.ResumePhase, t.FailureStage = "", ""
+	t.Attempt++
+	r.Targets[id] = t
+	return nil
 }
 
 func (j Journal) RequestRollback(id string) error {
@@ -325,14 +377,22 @@ func (j Journal) RequestRollback(id string) error {
 		if err != nil {
 			return err
 		}
-		t, ok := r.Targets[id]
-		if !ok || !t.RollbackAvailable || (t.Phase != Failed && t.Phase != Succeeded && t.Phase != Installing && t.Phase != Verifying) {
-			return errors.New("target has no installation to roll back")
+		if err := RequestTargetRollback(&r, id); err != nil {
+			return err
 		}
-		t.Phase, t.Error = RollingBack, ""
-		t.Operation = "rollback"
-		t.ResumePhase, t.FailureStage = "", ""
-		r.Targets[id] = t
 		return j.save(r)
 	})
+}
+
+func RequestTargetRollback(r *Receipt, id string) error {
+	t, ok := r.Targets[id]
+	if !ok || t.Operation != "install" || !t.RollbackAvailable || (t.Phase != Failed && t.Phase != Succeeded && t.Phase != Installing && t.Phase != Verifying) {
+		return errors.New("target has no installation to roll back")
+	}
+	t.Phase, t.Error = RollingBack, ""
+	t.Operation = "rollback"
+	t.Attempt++
+	t.ResumePhase, t.FailureStage = "", ""
+	r.Targets[id] = t
+	return nil
 }

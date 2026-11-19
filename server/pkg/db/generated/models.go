@@ -798,6 +798,14 @@ type Feedback struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type ForkUpdateRollout struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Digest      string      `json:"digest"`
+	Sequence    int64       `json:"sequence"`
+	Body        []byte      `json:"body"`
+	Revision    int64       `json:"revision"`
+}
+
 type GithubInstallation struct {
 	ID               pgtype.UUID        `json:"id"`
 	WorkspaceID      pgtype.UUID        `json:"workspace_id"`

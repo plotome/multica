@@ -1421,6 +1421,13 @@ func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 			run:  func() error { return qtx.DeleteWorkspaceAdministration(ctx, requester.WorkspaceID) },
 		},
 		{
+			name: "delete Fork update receipts",
+			run: func() error {
+				_, err := tx.Exec(ctx, `DELETE FROM fork_update_rollout WHERE workspace_id=$1`, requester.WorkspaceID)
+				return err
+			},
+		},
+		{
 			// At this point workspaceMember has resolved → workspaceID is a
 			// valid UUID, so reuse the resolved value. The existing final
 			// statement also sweeps any expand-phase compatibility leftovers.

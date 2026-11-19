@@ -1670,6 +1670,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Get("/runtimes/{runtimeId}/tasks/pending", h.ListPendingTasksByRuntime)
 		r.Post("/runtimes/{runtimeId}/update/{updateId}/result", h.ReportUpdateResult)
 		r.Get("/runtimes/{runtimeId}/fork-update", h.GetForkUpdateForConsumer)
+		r.Get("/runtimes/{runtimeId}/fork-update/assets/{digest}", h.GetForkUpdateArtifact)
 		r.Post("/runtimes/{runtimeId}/fork-update/report", h.ReportForkUpdate)
 		r.Post("/runtimes/{runtimeId}/models/{requestId}/result", h.ReportModelListResult)
 		r.Post("/runtimes/{runtimeId}/local-skills/{requestId}/result", h.ReportLocalSkillListResult)

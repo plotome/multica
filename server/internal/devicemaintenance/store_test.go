@@ -306,3 +306,26 @@ func TestDeviceMaintenanceFailedDeploymentDoesNotClaimCapability(t *testing.T) {
 	state = must(t, Store{pool}, device, fx.UserID, "drain", binding(state))
 	must(t, Store{pool}, device, fx.UserID, "release", binding(state))
 }
+
+func TestDeviceMaintenanceReleaseHistoryRespectsReownedIdentity(t *testing.T) {
+	pool, fx, device, rt := fixture(t)
+	s := Store{pool}
+	ctx := context.Background()
+	state := must(t, s, device, fx.UserID, "acquire", request())
+	state = must(t, s, device, fx.UserID, "drain", binding(state))
+	must(t, s, device, fx.UserID, "release", binding(state))
+	if must(t, s, device, fx.UserID, "status", Request{}).Generation != state.Generation {
+		t.Fatal("release reconciliation lost its audit binding")
+	}
+	other := fx.User(t, "new logical device owner", uuid.NewString()+"@example.invalid")
+	fx.Member(t, fx.WorkspaceID, other, "member")
+	if _, e := pool.Exec(ctx, `UPDATE agent_runtime SET owner_id=$2 WHERE id=$1`, rt, other); e != nil {
+		t.Fatal(e)
+	}
+	// Restore the original owner before fixture FK cleanup.
+	t.Cleanup(func() { pool.Exec(ctx, `UPDATE agent_runtime SET owner_id=$2 WHERE id=$1`, rt, fx.UserID) })
+	observed := must(t, s, device, other, "status", Request{})
+	if observed.Lease != "" || observed.Generation != "" || observed.Digest != "" {
+		t.Fatal("another owner's release history leaked through reused daemon ID")
+	}
+}

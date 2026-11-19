@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/multica-ai/multica/server/internal/util"
 )
 
 type Database interface {
@@ -49,10 +50,10 @@ var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 // Act authenticates the complete device scope under the same exclusive lock
 // used by registration/task triggers. Any failure rolls back the entire scope.
 func (s Store) Act(ctx context.Context, device, actor, action string, req Request) (out State, err error) {
-	if _, e := uuid.Parse(device); e != nil {
+	if _, e := util.ParseUUID(device); e != nil {
 		return out, refusal(400, "invalid daemon identity")
 	}
-	if _, e := uuid.Parse(actor); e != nil {
+	if _, e := util.ParseUUID(actor); e != nil {
 		return out, refusal(403, "human identity required")
 	}
 	switch action {
@@ -154,7 +155,8 @@ func (s Store) Act(ctx context.Context, device, actor, action string, req Reques
 	if !out.Frozen && (action == "status" || action == "capabilities") {
 		// Reconcile a lost release acknowledgement against its durable binding.
 		e := tx.QueryRow(ctx, `SELECT body->'state'->>'lease',body->'state'->>'digest',body->'state'->>'generation'
-		 FROM device_maintenance_event WHERE daemon_id=$1 AND action='release' ORDER BY id DESC LIMIT 1`, device).Scan(&out.Lease, &out.Digest, &out.Generation)
+		 FROM device_maintenance_event WHERE daemon_id=$1 AND action='release'
+		 AND body->>'device_owner'=$2 ORDER BY id DESC LIMIT 1`, device, owner).Scan(&out.Lease, &out.Digest, &out.Generation)
 		if e != nil && !errors.Is(e, pgx.ErrNoRows) {
 			return out, e
 		}
@@ -163,7 +165,7 @@ func (s Store) Act(ctx context.Context, device, actor, action string, req Reques
 		return out, refusal(409, "device ownership changed while frozen")
 	}
 	if action == "acquire" {
-		if _, e := uuid.Parse(req.Lease); e != nil || !digestPattern.MatchString(req.Digest) {
+		if _, e := util.ParseUUID(req.Lease); e != nil || !digestPattern.MatchString(req.Digest) {
 			return out, refusal(400, "lease UUID and digest required")
 		}
 		if out.Frozen {
@@ -220,9 +222,10 @@ func (s Store) Act(ctx context.Context, device, actor, action string, req Reques
 	}
 	if action == "acquire" || action == "drain" || action == "release" {
 		record, _ := json.Marshal(struct {
-			State State  `json:"state"`
-			Actor string `json:"actor"`
-		}{out, actor})
+			State       State  `json:"state"`
+			Actor       string `json:"actor"`
+			DeviceOwner string `json:"device_owner"`
+		}{out, actor, owner})
 		if _, err = tx.Exec(ctx, `INSERT INTO device_maintenance_event(daemon_id,action,body) VALUES($1,$2,$3::jsonb)`, device, action, record); err != nil {
 			return out, err
 		}

@@ -115,6 +115,10 @@ func init() {
 	f.Duration("auto-update-interval", 0, "How often to poll GitHub for a newer release (env: MULTICA_DAEMON_AUTO_UPDATE_INTERVAL)")
 	f.Bool("no-auto-reload", false, "Disable restarting when the multica binary on disk changes version (env: MULTICA_DAEMON_AUTO_RELOAD=false)")
 	daemonStopCmd.Flags().Bool("force", false, "Wait for graceful shutdown, then force termination if needed")
+	daemonStopCmd.Flags().Bool("when-idle", false, "Stop only after the daemon atomically excludes active tasks and new claims")
+	daemonStopCmd.Flags().String("expected-commit", "", "Require this full running commit before an idle-only stop")
+	daemonStopCmd.Flags().String("output", "text", "Idle-stop result format: text or json (json requires --when-idle)")
+	daemonStopCmd.MarkFlagsMutuallyExclusive("force", "when-idle")
 
 	daemonLogsCmd.Flags().BoolP("follow", "f", false, "Follow log output")
 	daemonLogsCmd.Flags().IntP("lines", "n", 50, "Number of lines to show")
@@ -1126,7 +1130,11 @@ func runDaemonForeground(cmd *cobra.Command) error {
 	}
 	cfg.CLIVersion = version
 	// Report this process's embedded revision, never the binary currently on disk.
-	cfg.CLICommit = buildCommit
+	cfg.CLICommit = runningDaemonCommit(buildCommit, commit)
+	cfg.MaintenanceDir, err = cli.ProfileDir(profile)
+	if err != nil {
+		return err
+	}
 	// Set by the Electron Desktop app when it spawns the CLI so the server
 	// can mark those runtimes as "managed" and hide CLI self-update UI.
 	cfg.LaunchedBy = os.Getenv("MULTICA_LAUNCHED_BY")
@@ -1383,6 +1391,21 @@ func runDaemonStop(cmd *cobra.Command, _ []string) error {
 	if err := requireHumanLocalCommand("daemon stop"); err != nil {
 		return err
 	}
+	expectedCommit, _ := cmd.Flags().GetString("expected-commit")
+	requestedIdle, _ := cmd.Flags().GetBool("when-idle")
+	stopOutput, _ := cmd.Flags().GetString("output")
+	if !cmd.Flags().Changed("output") {
+		stopOutput = "text"
+	}
+	if stopOutput != "text" && stopOutput != "json" {
+		return fmt.Errorf("output must be text or json")
+	}
+	if stopOutput == "json" && !requestedIdle {
+		return fmt.Errorf("JSON stop output requires --when-idle")
+	}
+	if expectedCommit != "" && !requestedIdle {
+		return fmt.Errorf("--expected-commit requires --when-idle")
+	}
 	profile := resolveProfile(cmd)
 	if err := requireKnownProfile(profile); err != nil {
 		return err
@@ -1402,6 +1425,9 @@ func runDaemonStop(cmd *cobra.Command, _ []string) error {
 	}
 	if !daemonAlive(health) {
 		label := "Daemon"
+		if stopOutput == "json" {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]string{"state": "stopped"})
+		}
 		if profile != "" {
 			label = fmt.Sprintf("Daemon [%s]", profile)
 		}
@@ -1430,7 +1456,26 @@ func runDaemonStop(cmd *cobra.Command, _ []string) error {
 	// GenerateConsoleCtrlEvent can't reach it; HTTP works on both
 	// platforms and triggers the same context-cancel path the daemon
 	// already uses for self-restart.
-	if err := requestDaemonShutdown(healthPort); err != nil {
+	whenIdle, _ := cmd.Flags().GetBool("when-idle")
+	var shutdownErr error
+	if whenIdle {
+		if expectedCommit != "" && health["cli_commit"] != expectedCommit {
+			return fmt.Errorf("running daemon source changed before idle shutdown")
+		}
+		if supported, _ := health["idle_shutdown_supported"].(bool); !supported {
+			return fmt.Errorf("running daemon does not support atomic idle shutdown; bootstrap during an approved maintenance window")
+		}
+		shutdownErr = requestDaemonIdleShutdown(healthPort, int(pid))
+		if errors.Is(shutdownErr, errIdleShutdownBusy) && stopOutput == "json" {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]string{"state": "waiting", "reason": "busy"})
+		}
+		if shutdownErr != nil {
+			return fmt.Errorf("idle shutdown deferred without force: %w", shutdownErr)
+		}
+	} else {
+		shutdownErr = requestDaemonShutdown(healthPort)
+	}
+	if err := shutdownErr; err != nil {
 		fmt.Fprintf(os.Stderr, "Graceful shutdown request failed: %v — falling back to forced kill.\n", err)
 		if kerr := process.Kill(); kerr != nil {
 			return fmt.Errorf("kill daemon (pid %d): %w", int(pid), kerr)
@@ -1447,12 +1492,18 @@ func runDaemonStop(cmd *cobra.Command, _ []string) error {
 		cancel2()
 		if !daemonAlive(h) {
 			os.Remove(daemonPIDPathForProfile(profile))
+			if stopOutput == "json" {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]string{"state": "stopped"})
+			}
 			fmt.Fprintln(os.Stderr, "Daemon stopped.")
 			return nil
 		}
 	}
 
 	fmt.Fprintln(os.Stderr, "Daemon is still stopping. It may be finishing an in-progress run.")
+	if stopOutput == "json" {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]string{"state": "stopping"})
+	}
 	return nil
 }
 
@@ -1461,6 +1512,14 @@ func runDaemonStop(cmd *cobra.Command, _ []string) error {
 // (network error, non-2xx status, or the endpoint predates this change).
 func requestDaemonShutdown(healthPort int) error {
 	url := fmt.Sprintf("http://127.0.0.1:%d/shutdown", healthPort)
+	return requestDaemonShutdownURL(url)
+}
+
+func requestDaemonIdleShutdown(healthPort, pid int) error {
+	return requestDaemonShutdownURL(fmt.Sprintf("http://127.0.0.1:%d/shutdown?when_idle=1&expected_pid=%d", healthPort, pid))
+}
+
+func requestDaemonShutdownURL(url string) error {
 	req, err := http.NewRequest(http.MethodPost, url, nil)
 	if err != nil {
 		return err
@@ -1471,11 +1530,19 @@ func requestDaemonShutdown(healthPort int) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusConflict {
+		body, _ := io.ReadAll(resp.Body)
+		if strings.TrimSpace(string(body)) == "daemon is busy" {
+			return errIdleShutdownBusy
+		}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 	return nil
 }
+
+var errIdleShutdownBusy = errors.New("daemon is busy")
 
 // --- daemon status ---
 
@@ -2515,4 +2582,25 @@ func formatAge(seconds int64) string {
 	default:
 		return fmt.Sprintf("%ds", seconds)
 	}
+}
+
+// Only a full embedded build revision attests source identity. Release builds
+// populate commit; local desktop builds populate buildCommit. Neither version
+// strings nor the replacement executable on disk are identity evidence.
+func runningDaemonCommit(localBuild, releaseBuild string) string {
+	for _, revision := range []string{localBuild, releaseBuild} {
+		if len(revision) == 40 {
+			valid := true
+			for _, r := range revision {
+				if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+					valid = false
+					break
+				}
+			}
+			if valid {
+				return revision
+			}
+		}
+	}
+	return "unknown"
 }

@@ -103,6 +103,7 @@ var DefaultGCArtifactPatterns = []string{"node_modules", ".next", ".turbo"}
 
 // Config holds all daemon configuration.
 type Config struct {
+	MaintenanceDir                 string // profile-owned persistent update lease; never supplied by a catalog
 	ServerBaseURL                  string
 	DaemonID                       string
 	LegacyDaemonIDs                []string // historical daemon_ids this machine may have registered under; reported at register time so the server can merge old runtime rows

@@ -161,3 +161,35 @@ func (d *Daemon) updateMaintenanceHandler(resume bool) http.HandlerFunc {
 		fmt.Fprintln(w, `{"status":"ok"}`)
 	}
 }
+
+// Stop only the process holding this already-persisted lease. No signal/force
+// fallback exists; a KeepAlive successor remains paused by the same lease.
+func (d *Daemon) updateMaintenanceStopHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		var req updateMaintenanceRequest
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&req); err != nil {
+			http.Error(w, "invalid update request", 400)
+			return
+		}
+		d.claimMu.Lock()
+		defer d.claimMu.Unlock()
+		lease, err := d.readUpdateLease()
+		if err != nil || lease == nil || *lease != req.updateLease || !d.updateMaintenance || req.PID != os.Getpid() || !updateRevision.MatchString(req.Commit) || req.Commit != d.cfg.CLICommit {
+			http.Error(w, "verified update lease is not held by this process", 409)
+			return
+		}
+		if d.cancelFunc == nil {
+			http.Error(w, "shutdown unavailable", 503)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"status":"ok"}`)
+		go d.cancelFunc()
+	}
+}

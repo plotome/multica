@@ -179,6 +179,8 @@ interface DaemonAPI {
 }
 
 interface UpdaterAPI {
+ requestForkCheck?:()=>Promise<void>;
+ onForkCheck?:(callback:()=>void)=>()=>void;
   onUpdateAvailable: (callback: (info: { version: string; releaseNotes?: string }) => void) => () => void;
   onDownloadProgress: (callback: (progress: { percent: number }) => void) => () => void;
   onUpdateDownloaded: (

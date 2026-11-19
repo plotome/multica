@@ -171,3 +171,16 @@ it("shows no update without enabling installation", async () => {
     screen.queryByRole("button", { name: "Update all devices" }),
   ).not.toBeInTheDocument();
 });
+
+it("keeps candidate failure separate from baseline restoration and actual version", async () => {
+ const state=fixture();state.receipt.approved=true;
+ const target=state.receipt.targets.mini;
+ target.phase="failed";target.failure_stage="running-verification";target.error="candidate unhealthy";
+ target.recovery={status:"restored",candidate_error:"candidate unhealthy"};
+ target.observation={at:"2026-11-20T00:00:00Z",components:[{kind:"cli",version:"1.0",commit:"a".repeat(40)},{kind:"daemon",version:"1.0",commit:"a".repeat(40)}]};
+ mocks.get.mockResolvedValue(state);mount();
+ expect((await screen.findAllByText(/candidate unhealthy/)).length).toBeGreaterThan(0);
+ expect(screen.queryByText("Every update unit has passed running verification.")).not.toBeInTheDocument();
+ expect(screen.getByRole("button",{name:/Retry candidate update/})).toBeInTheDocument();
+ expect(screen.getAllByText(/1.0/).length).toBeGreaterThan(0);
+});

@@ -34,6 +34,8 @@ type Baseline struct {
 }
 
 type Target struct {
+	CandidateDigest   string       `json:"candidate_digest"`
+	Recovery          *Recovery    `json:"recovery,omitempty"`
 	Artifact          Artifact     `json:"artifact"`
 	Baseline          Baseline     `json:"baseline"`
 	Phase             Phase        `json:"phase"`
@@ -43,6 +45,7 @@ type Target struct {
 	FailureStage      string       `json:"failure_stage,omitempty"`
 	ResumePhase       Phase        `json:"resume_phase,omitempty"`
 	RollbackAvailable bool         `json:"rollback_available"`
+	RepairPackage     bool         `json:"repair_package"`
 	PackageReady      bool         `json:"package_ready"`
 	Attempt           uint64       `json:"attempt"`
 	Observation       *Observation `json:"observation,omitempty"`
@@ -73,7 +76,7 @@ func Plan(candidate VerifiedCatalog, installed map[string]Baseline) (Receipt, er
 		if _, duplicate := r.Targets[a.ID]; duplicate {
 			return r, fmt.Errorf("duplicate target %q", a.ID)
 		}
-		r.Targets[a.ID] = Target{Artifact: a, Baseline: b, Phase: Prepared, Operation: "install", Attempt: 1}
+		r.Targets[a.ID] = Target{CandidateDigest: candidate.Digest, Artifact: a, Baseline: b, Phase: Prepared, Operation: "install", Attempt: 1}
 	}
 	return r, nil
 }
@@ -91,10 +94,10 @@ func (r Receipt) Complete() bool {
 }
 
 type Probe struct {
-	Online            bool
-	Busy              bool
-	RollbackAvailable bool
-	Observation       *Observation
+	Online            bool         `json:"online"`
+	Busy              bool         `json:"busy"`
+	RollbackAvailable bool         `json:"rollback_available"`
+	Observation       *Observation `json:"observation,omitempty"`
 }
 
 // Driver implementations must use the existing host release tools. Install and
@@ -226,11 +229,12 @@ func (j Journal) Advance(ctx context.Context, id, host string, driver Driver) er
 	if err := os.MkdirAll(j.LockDir, 0700); err != nil {
 		return err
 	}
-	unlock, err := lockJournal(filepath.Join(j.LockDir, host+".lock"))
+	hostFile, err := openJournalLock(filepath.Join(j.LockDir, host+".lock"))
 	if err != nil {
 		return err
 	}
-	defer unlock()
+	defer hostFile.Close()
+	ctx = context.WithValue(ctx, hostLockContextKey{}, hostFile)
 	return j.withLock(func() error {
 		r, err := j.load()
 		if err != nil {
@@ -246,7 +250,7 @@ func (j Journal) Advance(ctx context.Context, id, host string, driver Driver) er
 		switch t.Phase {
 		case Succeeded, Failed, RolledBack:
 			return nil
-		case Prepared, Downloading, Validating, Waiting, Installing, Verifying, RollingBack, VerifyingRollback:
+		case Prepared, Downloading, Validating, Waiting, Installing, Verifying, RollingBack, VerifyingRollback, Restoring, VerifyingRestore:
 		default:
 			return fmt.Errorf("unknown target state %q", t.Phase)
 		}
@@ -254,6 +258,35 @@ func (j Journal) Advance(ctx context.Context, id, host string, driver Driver) er
 			t.Phase, t.Error = phase, message
 			r.Targets[id] = t
 			return j.save(r)
+		}
+
+		if t.Phase == Restoring || t.Phase == VerifyingRestore {
+			return j.restore(ctx, id, &r, &t, driver)
+		}
+		candidateFailure := func(stage string, cause error) error {
+			var interrupted adapterInterruptedError
+			if errors.As(cause, &interrupted) {
+				return cause
+			}
+			if errors.Is(cause, context.Canceled) {
+				return cause
+			}
+			if t.Recovery == nil {
+				t.FailureStage = stage
+				t.ResumePhase = t.Phase
+				t.Log = cause.Error()
+				return errors.Join(cause, persist(Failed, cause.Error()))
+			}
+			t.Error = cause.Error()
+			t.Log = cause.Error()
+			t.FailureStage = stage
+			t.Recovery.CandidateError = cause.Error()
+			t.Recovery.CandidateStage = stage
+			t.Recovery.Status = "restoring"
+			if err := persist(Restoring, cause.Error()); err != nil {
+				return err
+			}
+			return j.restore(ctx, id, &r, &t, driver)
 		}
 		fail := func(stage string, err error) error {
 			t.FailureStage, t.ResumePhase = stage, t.Phase
@@ -263,7 +296,11 @@ func (j Journal) Advance(ctx context.Context, id, host string, driver Driver) er
 			}
 			return err
 		}
-		probe, err := driver.Probe(ctx, t)
+		probe := Probe{Online: true, RollbackAvailable: t.RollbackAvailable}
+		err = nil
+		if t.Phase != Installing && t.Phase != Verifying {
+			probe, err = driver.Probe(ctx, t)
+		}
 		if err != nil {
 			return fail("probe", err)
 		}
@@ -311,12 +348,45 @@ func (j Journal) Advance(ctx context.Context, id, host string, driver Driver) er
 		if t.Operation != "install" {
 			return errors.New("unknown update operation")
 		}
+
+		_, supportsRecovery := driver.(RecoveryPlanner)
+		if (t.Artifact.Kind == "server-web" || supportsRecovery) && t.Recovery == nil {
+			if t.Phase == Installing || t.Phase == Verifying {
+				return errors.New("interrupted server update lacks a durable recovery snapshot")
+			}
+			planner, ok := driver.(RecoveryPlanner)
+			if !ok {
+				return persist(Prepared, "release adapter has not verified a recovery baseline")
+			}
+			plan, err := planner.PrepareRecovery(ctx, t)
+			if err == nil {
+				err = plan.Validate(t)
+			}
+			if err != nil {
+				return persist(Prepared, err.Error())
+			}
+			t.Recovery = &Recovery{Plan: plan, Status: "prepared"}
+			if err := persist(Prepared, ""); err != nil {
+				return err
+			}
+		}
 		if t.Phase != Verifying {
 			if err := persist(Installing, ""); err != nil {
 				return err
 			}
 			if err := driver.Install(ctx, t); err != nil {
-				return fail("install", err)
+				var deferred adapterDeferredError
+				if errors.As(err, &deferred) {
+					return persist(Waiting, err.Error())
+				}
+				var invalid packageValidationError
+				if errors.As(err, &invalid) {
+					t.PackageReady = false
+					t.Recovery = nil
+					t.Phase = Prepared
+					return fail("package-validation", err)
+				}
+				return candidateFailure("install", err)
 			}
 			if err := persist(Verifying, ""); err != nil {
 				return err
@@ -325,9 +395,12 @@ func (j Journal) Advance(ctx context.Context, id, host string, driver Driver) er
 		observation, err := driver.Verify(ctx, t)
 		if err == nil {
 			err = observation.Validate(t.Artifact.Kind, t.Artifact.Commit)
+			if err == nil {
+				err = observation.ValidateVersions(t.Artifact.ComponentVersions)
+			}
 		}
 		if err != nil {
-			return fail("running-verification", err)
+			return candidateFailure("running-verification", err)
 		}
 		t.Observation = &observation
 		return persist(Succeeded, "")
@@ -352,6 +425,22 @@ func RetryTarget(r *Receipt, id string) error {
 	if !ok || t.Phase != Failed {
 		return errors.New("only a failed target can be retried")
 	}
+	if t.Recovery != nil {
+		if t.Recovery.Status == "failed" {
+			if t.ResumePhase != Restoring && t.ResumePhase != VerifyingRestore {
+				return errors.New("invalid baseline restoration retry checkpoint")
+			}
+			t.Phase = t.ResumePhase
+			t.ResumePhase = ""
+			t.Recovery.Error = ""
+			t.Attempt++
+			r.Targets[id] = t
+			return nil
+		}
+		if t.Recovery.Status == "restored" {
+			t.Recovery = nil
+		}
+	}
 	switch t.Operation {
 	case "rollback":
 		if t.ResumePhase != RollingBack && t.ResumePhase != VerifyingRollback {
@@ -363,6 +452,10 @@ func RetryTarget(r *Receipt, id string) error {
 		}
 	default:
 		return errors.New("unknown recovery operation")
+	}
+	if t.FailureStage == "package-validation" || t.FailureStage == "download" {
+		t.PackageReady = false
+		t.RepairPackage = true
 	}
 	t.Phase, t.Error = t.ResumePhase, ""
 	t.ResumePhase, t.FailureStage = "", ""

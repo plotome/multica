@@ -18,6 +18,7 @@ const TargetSchema = z.object({
   phase: z.string(),
   operation: z.string(),
   attempt: z.number(),
+  recovery: z.object({status:z.string(),candidate_error:z.string().optional(),candidate_stage:z.string().optional(),error:z.string().optional()}).optional(),
   error: z.string().optional(),
   log: z.string().optional(),
   failure_stage: z.string().optional(),

@@ -2,6 +2,7 @@ package forkupdate
 
 import (
 	"context"
+	"errors"
 	"os"
 )
 
@@ -17,12 +18,22 @@ type verifiedPackageDriver struct {
 func (d verifiedPackageDriver) Install(ctx context.Context, target Target) error {
 	file, err := os.Open(d.path)
 	if err != nil {
-		return err
+		return packageValidationError{err}
 	}
 	err = VerifyArtifact(file, target.Artifact)
 	file.Close()
 	if err != nil {
-		return err
+		return packageValidationError{err}
 	}
 	return d.Driver.Install(ctx, target)
 }
+
+func (d verifiedPackageDriver) PrepareRecovery(ctx context.Context, target Target) (RecoveryPlan, error) {
+	planner, ok := d.Driver.(RecoveryPlanner)
+	if !ok {
+		return RecoveryPlan{}, errors.New("release adapter has no recovery planner")
+	}
+	return planner.PrepareRecovery(ctx, target)
+}
+
+type packageValidationError struct{ error }

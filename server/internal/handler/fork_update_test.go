@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -9,6 +10,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/go-chi/chi/v5"
+	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/middleware"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,8 +28,9 @@ func TestForkUpdateOwnerApprovalPersistsAndMachineActorsCannotApprove(t *testing
 		t.Skip("disposable database required")
 	}
 	packageBytes := []byte("fixture package")
-	artifactServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(packageBytes) }))
-	defer artifactServer.Close()
+	apiRouter := chi.NewRouter()
+	apiServer := httptest.NewTLSServer(apiRouter)
+	defer apiServer.Close()
 	packageHash := fmt.Sprintf("%x", sha256.Sum256(packageBytes))
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -35,11 +39,15 @@ func TestForkUpdateOwnerApprovalPersistsAndMachineActorsCannotApprove(t *testing
 	dir := t.TempDir()
 	catalogPath := filepath.Join(dir, "catalog.json")
 	configPath := filepath.Join(dir, "policy.json")
-	artifact := forkupdate.Artifact{ID: "unit", Host: "mini", Kind: "cli-daemon", Platform: "darwin", Arch: "arm64", Version: "2.0", Commit: strings.Repeat("b", 40), URL: artifactServer.URL + "/package", SHA256: packageHash, Bytes: int64(len(packageBytes)), ComponentVersions: map[string]string{"cli": "2.0", "daemon": "2.0"}}
-	catalog := forkupdate.Catalog{Schema: 1, Channel: "selfhost", Sequence: 2, Artifacts: []forkupdate.Artifact{artifact}}
+	artifact := forkupdate.Artifact{ID: "unit", Host: "mini", Kind: "cli-daemon", Platform: "darwin", Arch: "arm64", Version: "2.0", Commit: strings.Repeat("b", 40), URL: apiServer.URL + "/api/daemon/runtimes/" + testRuntimeID + "/fork-update/assets/" + packageHash, SHA256: packageHash, Bytes: int64(len(packageBytes)), ComponentVersions: map[string]string{"cli": "2.0", "daemon": "2.0"}}
+	catalog := forkupdate.Catalog{Source: &forkupdate.SourceProof{Commit: strings.Repeat("b", 40), Repository: forkupdate.ForkSourceURL, GateSHA256: strings.Repeat("c", 64), Merged: true}, Schema: 1, Channel: "selfhost", Sequence: 2, Artifacts: []forkupdate.Artifact{artifact}}
 	payload, _ := json.Marshal(catalog)
 	envelope, _ := json.Marshal(forkupdate.Envelope{Payload: base64.StdEncoding.EncodeToString(payload), Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(private, payload))})
-	policy := forkUpdatePolicy{Workspace: testWorkspaceID, Owner: testUserID, CatalogPath: catalogPath, PublicKey: base64.StdEncoding.EncodeToString(public), Origin: artifactServer.URL, Channel: "selfhost", Hosts: map[string]string{"mini": testRuntimeID}, Installed: map[string]forkupdate.Baseline{"unit": {Host: "mini", Commit: strings.Repeat("a", 40), Sequence: 1, Platform: "darwin", Arch: "arm64"}}}
+	artifactDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(artifactDir, packageHash), packageBytes, 0400); err != nil {
+		t.Fatal(err)
+	}
+	policy := forkUpdatePolicy{ArtifactDir: artifactDir, Workspace: testWorkspaceID, Owner: testUserID, CatalogPath: catalogPath, PublicKey: base64.StdEncoding.EncodeToString(public), Origin: apiServer.URL, Channel: "selfhost", Hosts: map[string]string{"mini": testRuntimeID}, Installed: map[string]forkupdate.Baseline{"unit": {Host: "mini", Commit: strings.Repeat("a", 40), Sequence: 1, Platform: "darwin", Arch: "arm64"}}}
 	data, _ := json.Marshal(policy)
 	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		t.Fatal(err)
@@ -93,26 +101,53 @@ func TestForkUpdateOwnerApprovalPersistsAndMachineActorsCannotApprove(t *testing
 	if stale.Code != http.StatusConflict {
 		t.Fatal("stale approval overwrote state")
 	}
-	// Exercise the real consumer over HTTP against these handlers and PostgreSQL.
-	// Authentication is explicitly a fixture; middleware credentials are not
-	// installed on a live runtime or copied into a preview.
-	router := chi.NewRouter()
-	router.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != "Bearer fixture" {
-				w.WriteHeader(401)
-				return
-			}
-			r.Header.Set("X-User-ID", testUserID)
-			next.ServeHTTP(w, r)
-		})
+	// Real native authentication: fresh test-only PAT rows, Auth/DaemonAuth,
+	// membership and runtime owner checks all run against the disposable DB.
+	ownerPAT, err := auth.GeneratePATToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = testPool.Exec(context.Background(), `INSERT INTO personal_access_token(user_id,name,token_hash,token_prefix,expires_at) VALUES($1,'fork update isolation',$2,'mul_test',now()+interval '1 hour')`, testUserID, auth.HashToken(ownerPAT)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM personal_access_token WHERE token_hash=$1`, auth.HashToken(ownerPAT))
 	})
-	router.Get("/api/daemon/runtimes/{runtimeId}/fork-update", restarted.GetForkUpdateForConsumer)
-	router.Post("/api/daemon/runtimes/{runtimeId}/fork-update/report", restarted.ReportForkUpdate)
-	apiServer := httptest.NewServer(router)
-	defer apiServer.Close()
+	router := apiRouter
+	router.Group(func(r chi.Router) {
+		r.Use(middleware.Auth(restarted.Queries, nil, nil, nil))
+		r.Get("/api/fork-updates", restarted.GetForkUpdate)
+		r.With(RequireHumanActor).Post("/api/fork-updates/action", restarted.ActOnForkUpdate)
+	})
+	router.Group(func(r chi.Router) {
+		r.Use(middleware.DaemonAuth(restarted.Queries, nil, nil, nil))
+		r.Get("/api/daemon/runtimes/{runtimeId}/fork-update", restarted.GetForkUpdateForConsumer)
+		r.Post("/api/daemon/runtimes/{runtimeId}/fork-update/report", restarted.ReportForkUpdate)
+		r.Get("/api/daemon/runtimes/{runtimeId}/fork-update/assets/{digest}", restarted.GetForkUpdateArtifact)
+	})
+	artifactClient := *apiServer.Client()
+	artifactClient.Transport = forkTestAuthTransport{base: artifactClient.Transport, token: ownerPAT}
+	// Forged actor headers without a valid native credential cannot approve.
+	actionBytes, _ := json.Marshal(map[string]any{"action": "approve", "digest": state.Receipt.Digest, "revision": state.Revision})
+	for _, token := range []string{"invalid", ownerPAT} {
+		req, _ := http.NewRequest(http.MethodPost, apiServer.URL+"/api/fork-updates/action", bytes.NewReader(actionBytes))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-User-ID", testUserID)
+		response, err := apiServer.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		expected := http.StatusUnauthorized
+		if token == ownerPAT {
+			expected = http.StatusOK
+		}
+		if response.StatusCode != expected {
+			t.Fatalf("native owner authentication status %d, expected %d", response.StatusCode, expected)
+		}
+	}
 	driver := &forkHandlerDriver{path: filepath.Join(t.TempDir(), "installed"), busy: true}
-	consumer := forkupdate.Consumer{Client: forkupdate.ControlClient{BaseURL: apiServer.URL, RuntimeID: testRuntimeID, Token: "fixture", HTTP: apiServer.Client()}, Policy: forkupdate.Policy{PublicKey: public, Origin: artifactServer.URL, Channel: "selfhost"}, Host: "mini", StateDir: t.TempDir(), LockDir: t.TempDir(), CacheDir: t.TempDir(), Artifacts: artifactServer.Client(), Driver: func(context.Context, forkupdate.Target, string) (forkupdate.Driver, error) { return driver, nil }}
+	consumer := forkupdate.Consumer{Client: forkupdate.ControlClient{BaseURL: apiServer.URL, RuntimeID: testRuntimeID, Token: ownerPAT, HTTP: apiServer.Client()}, Policy: forkupdate.Policy{PublicKey: public, Origin: apiServer.URL, Channel: "selfhost"}, Host: "mini", StateDir: t.TempDir(), LockDir: t.TempDir(), CacheDir: t.TempDir(), Artifacts: &artifactClient, Driver: func(context.Context, forkupdate.Target, string) (forkupdate.Driver, error) { return driver, nil }}
 	if err := consumer.Tick(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -190,5 +225,25 @@ func (d *forkHandlerDriver) observe(commit string) (forkupdate.Observation, erro
 	if string(data) != commit {
 		return forkupdate.Observation{}, fmt.Errorf("running fixture revision differs")
 	}
-	return forkupdate.Observation{At: time.Now().UTC().Format(time.RFC3339Nano), Components: []forkupdate.InstalledComponent{{Kind: "cli", Version: "fixture", Commit: commit}, {Kind: "daemon", Version: "fixture", Commit: commit}}}, nil
+	return forkupdate.Observation{At: time.Now().UTC().Format(time.RFC3339Nano), Components: []forkupdate.InstalledComponent{{Kind: "cli", Version: "2.0", Commit: commit}, {Kind: "daemon", Version: "2.0", Commit: commit}}}, nil
+}
+
+func (d *forkHandlerDriver) PrepareRecovery(_ context.Context, target forkupdate.Target) (forkupdate.RecoveryPlan, error) {
+	observation := forkupdate.Observation{At: time.Now().UTC().Format(time.RFC3339Nano)}
+	for _, kind := range forkupdate.ExpectedComponents(target.Artifact.Kind) {
+		observation.Components = append(observation.Components, forkupdate.InstalledComponent{Kind: kind, Version: "fixture baseline", Commit: target.Baseline.Commit})
+	}
+	return forkupdate.RecoveryPlan{CandidateCommit: target.Artifact.Commit, BaselineCommit: target.Baseline.Commit, AssetsSHA256: strings.Repeat("c", 64), CompatibilitySHA256: strings.Repeat("d", 64), ForwardCompatible: true, BackwardCompatible: true, Baseline: observation}, nil
+}
+
+type forkTestAuthTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (t forkTestAuthTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	clone := r.Clone(r.Context())
+	clone.Header = r.Header.Clone()
+	clone.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(clone)
 }

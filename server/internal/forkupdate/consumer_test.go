@@ -190,6 +190,8 @@ func TestConsumerRestartsDuringControlOutageAndFinishesOnlyInFlightWork(t *testi
 		r.Approved = true
 		target := r.Targets["mini-server"]
 		target.Phase = Verifying
+		plan, _ := d.PrepareRecovery(context.Background(), target)
+		target.Recovery = &Recovery{Plan: plan, Status: "prepared"}
 		r.Targets["mini-server"] = target
 		return journal.save(r)
 	}); err != nil {
@@ -254,7 +256,7 @@ func TestConsumerRevalidatesPreparedCacheAtInstallBoundary(t *testing.T) {
 	if err := c.Tick(context.Background()); err == nil {
 		t.Fatal("corrupt prepared package installed")
 	}
-	if d.installCalls != 0 {
-		t.Fatal("install adapter received corrupt prepared bytes")
+	if d.installCalls != 0 || d.rollbackCalls != 0 {
+		t.Fatal("corrupt prepared bytes reached installation or baseline restoration")
 	}
 }

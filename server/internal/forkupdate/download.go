@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,8 +21,8 @@ func pinnedGET(ctx context.Context, client *http.Client, origin, endpoint string
 	if err != nil {
 		return nil, err
 	}
-	if base.Scheme != "https" || base.Host == "" || base.User != nil || (base.Path != "" && base.Path != "/") || base.RawQuery != "" || base.Fragment != "" || u.Scheme != base.Scheme || u.Host != base.Host || u.User != nil || u.Fragment != "" || u.RawQuery != "" {
-		return nil, errors.New("update URL is outside pinned HTTPS origin")
+	if !validUpdateOrigin(base) || base.Host == "" || base.User != nil || (base.Path != "" && base.Path != "/") || base.RawQuery != "" || base.Fragment != "" || u.Scheme != base.Scheme || u.Host != base.Host || u.User != nil || u.Fragment != "" || u.RawQuery != "" {
+		return nil, errors.New("update URL is outside pinned update origin")
 	}
 	if client == nil {
 		return nil, errors.New("HTTP client is required")
@@ -36,11 +37,19 @@ func pinnedGET(ctx context.Context, client *http.Client, origin, endpoint string
 	}
 	response, err := clone.Do(req)
 	if err != nil {
+		var network net.Error
+		if errors.As(err, &network) && ctx.Err() == nil {
+			return nil, artifactUnavailableError{err}
+		}
 		return nil, err
 	}
 	if response.StatusCode != http.StatusOK {
 		response.Body.Close()
-		return nil, fmt.Errorf("update endpoint returned HTTP %d", response.StatusCode)
+		err := fmt.Errorf("update endpoint returned HTTP %d", response.StatusCode)
+		if response.StatusCode >= 500 || response.StatusCode == 429 {
+			return nil, artifactUnavailableError{err}
+		}
+		return nil, err
 	}
 	return response, nil
 }
@@ -81,7 +90,10 @@ func DownloadArtifact(ctx context.Context, client *http.Client, policy Policy, a
 		return "", err
 	}
 	defer unlock()
-	if _, err := os.Lstat(target); err == nil {
+	if info, err := os.Lstat(target); err == nil {
+		if !info.Mode().IsRegular() {
+			return "", errors.New("artifact cache is not a regular file")
+		}
 		f, err := os.Open(target)
 		if err != nil {
 			return "", err
@@ -110,7 +122,7 @@ func DownloadArtifact(ctx context.Context, client *http.Client, policy Policy, a
 		return "", errors.New("invalid signed artifact length")
 	}
 	if _, err := io.Copy(f, io.LimitReader(response.Body, artifact.Bytes+1)); err != nil {
-		return "", err
+		return "", artifactUnavailableError{err}
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return "", err
@@ -132,3 +144,45 @@ func DownloadArtifact(ctx context.Context, client *http.Client, policy Policy, a
 	}
 	return target, nil
 }
+
+// Only an explicit retry authorizes replacement of an identified corrupt cache
+// entry. Unknown IO errors, directories and links never trigger deletion.
+func RepairArtifactCache(cache string, artifact Artifact) error {
+	if !filepath.IsAbs(cache) || !digestPattern.MatchString(artifact.SHA256) {
+		return errors.New("invalid artifact cache policy")
+	}
+	target := filepath.Join(cache, artifact.SHA256)
+	unlock, err := lockJournal(target + ".lock")
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	info, err := os.Lstat(target)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("corrupt artifact cache is not a regular file")
+	}
+	file, err := os.Open(target)
+	if err != nil {
+		return err
+	}
+	err = VerifyArtifact(file, artifact)
+	file.Close()
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrArtifactMismatch) {
+		return err
+	}
+	if err = os.Remove(target); err != nil {
+		return err
+	}
+	return syncDirectory(cache)
+}
+
+type artifactUnavailableError struct{ error }

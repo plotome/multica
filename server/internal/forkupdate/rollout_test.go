@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -13,6 +14,8 @@ import (
 // This models the release tools' idempotent disk transaction, separately from
 // the orchestrator journal, so process restarts cannot erase observed state.
 type diskDriver struct {
+	recoveryUnknown    bool
+	afterRollback      func()
 	root               string
 	probe              Probe
 	failInstall        bool
@@ -47,7 +50,12 @@ func (d *diskDriver) Install(_ context.Context, target Target) error {
 func fixtureObservation(target Target, commit string) Observation {
 	o := Observation{At: time.Now().UTC().Format(time.RFC3339Nano)}
 	for _, kind := range ExpectedComponents(target.Artifact.Kind) {
-		o.Components = append(o.Components, InstalledComponent{Kind: kind, Version: "fixture", Commit: commit})
+		o.Components = append(o.Components, InstalledComponent{Kind: kind, Version: func() string {
+			if commit == target.Artifact.Commit {
+				return target.Artifact.ComponentVersions[kind]
+			}
+			return "fixture-baseline"
+		}(), Commit: commit})
 	}
 	return o
 }
@@ -69,7 +77,11 @@ func (d *diskDriver) Rollback(_ context.Context, target Target) error {
 	if d.failRollback {
 		return errors.New("injected rollback interruption")
 	}
-	return os.WriteFile(filepath.Join(d.root, target.Artifact.ID), []byte(target.Baseline.Commit), 0600)
+	err := os.WriteFile(filepath.Join(d.root, target.Artifact.ID), []byte(target.Baseline.Commit), 0600)
+	if err == nil && d.afterRollback != nil {
+		d.afterRollback()
+	}
+	return err
 }
 func (d *diskDriver) VerifyRollback(_ context.Context, target Target) (Observation, error) {
 	if d.failRollbackVerify {
@@ -215,6 +227,8 @@ func TestRecoverInterruptedInstallAndVerify(t *testing.T) {
 				t.Fatal(err)
 			}
 			target.Phase = checkpoint
+			plan, _ := d.PrepareRecovery(context.Background(), target)
+			target.Recovery = &Recovery{Plan: plan, Status: "prepared"}
 			r.Targets["mini-server"] = target
 			if err := j.withLock(func() error { return j.save(r) }); err != nil {
 				t.Fatal(err)
@@ -433,4 +447,11 @@ func TestDifferentReceiptsCannotInstallSameHostConcurrently(t *testing.T) {
 	if err := second.Advance(context.Background(), "mini-cli", "mini", d); err != nil {
 		t.Fatal("host lock not released", err)
 	}
+}
+
+func (d *diskDriver) PrepareRecovery(_ context.Context, t Target) (RecoveryPlan, error) {
+	if d.recoveryUnknown {
+		return RecoveryPlan{}, errors.New("database compatibility unknown")
+	}
+	return RecoveryPlan{CandidateCommit: t.Artifact.Commit, BaselineCommit: t.Baseline.Commit, AssetsSHA256: strings.Repeat("c", 64), CompatibilitySHA256: strings.Repeat("d", 64), ForwardCompatible: true, BackwardCompatible: true, Baseline: fixtureObservation(t, t.Baseline.Commit)}, nil
 }

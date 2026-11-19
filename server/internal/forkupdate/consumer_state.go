@@ -36,7 +36,7 @@ func (c Consumer) recoverControlState() (ControlState, error) {
 			continue
 		}
 		switch target.Phase {
-		case Installing, Verifying, RollingBack, VerifyingRollback, Succeeded, RolledBack, Failed:
+		case Restoring, VerifyingRestore, Installing, Verifying, RollingBack, VerifyingRollback, Succeeded, RolledBack, Failed:
 		default:
 			return state, errors.New("offline approval cannot start a new local operation")
 		}

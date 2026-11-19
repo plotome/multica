@@ -15,6 +15,7 @@ import (
 )
 
 type ControlClient struct {
+	RefreshCatalog            *bool
 	BaseURL, RuntimeID, Token string
 	HTTP                      *http.Client
 }
@@ -69,7 +70,11 @@ func (c ControlClient) request(ctx context.Context, method, path string, body an
 
 func (c ControlClient) Fetch(ctx context.Context) (ControlState, error) {
 	var state ControlState
-	err := c.request(ctx, http.MethodGet, "/api/daemon/runtimes/"+url.PathEscape(c.RuntimeID)+"/fork-update", nil, &state)
+	path := "/api/daemon/runtimes/" + url.PathEscape(c.RuntimeID) + "/fork-update"
+	if c.RefreshCatalog != nil && !*c.RefreshCatalog {
+		path += "?catalog_refresh=0"
+	}
+	err := c.request(ctx, http.MethodGet, path, nil, &state)
 	return state, err
 }
 
@@ -82,6 +87,7 @@ type DriverFactory func(context.Context, Target, string) (Driver, error)
 // Consumer is called by a process outside the daemon/app lifecycle. No bearer
 // token, command path or local installation policy comes from the catalog.
 type Consumer struct {
+	AutoPrepare                       *bool
 	Client                            ControlClient
 	Policy                            Policy
 	Host, StateDir, LockDir, CacheDir string
@@ -120,9 +126,12 @@ func (c Consumer) reconcile(ctx context.Context, state ControlState, offline boo
 	}
 	for _, artifact := range candidate.Artifacts {
 		target, ok := state.Receipt.Targets[artifact.ID]
-		if !ok || !reflect.DeepEqual(artifact, target.Artifact) {
+		if !ok || target.CandidateDigest != candidate.Digest || !reflect.DeepEqual(artifact, target.Artifact) {
 			return errors.New("control plan altered signed artifact")
 		}
+	}
+	if !state.Receipt.Approved && c.AutoPrepare != nil && !*c.AutoPrepare {
+		return nil
 	}
 	if !filepath.IsAbs(c.StateDir) || !filepath.IsAbs(c.LockDir) || !idPattern.MatchString(c.Host) || c.Driver == nil {
 		return errors.New("invalid local consumer policy")
@@ -241,8 +250,18 @@ func (c Consumer) reconcile(ctx context.Context, state ControlState, offline boo
 					return err
 				}
 			}
+			if target.RepairPackage {
+				if err := RepairArtifactCache(c.CacheDir, artifact); err != nil {
+					return err
+				}
+			}
 			path, err = DownloadArtifact(ctx, c.Artifacts, c.Policy, artifact, c.CacheDir)
 			if err != nil {
+				var unavailable artifactUnavailableError
+				if errors.As(err, &unavailable) {
+					saveErr := checkpoint(Waiting, "", nil, nil)
+					return errors.Join(err, saveErr, deliveryErr)
+				}
 				saveErr := checkpoint(Failed, "download", err, nil)
 				return errors.Join(err, saveErr, deliveryErr)
 			}
@@ -272,6 +291,7 @@ func (c Consumer) reconcile(ctx context.Context, state ControlState, offline boo
 				}
 				t := r.Targets[artifact.ID]
 				t.PackageReady = true
+				t.RepairPackage = false
 				r.Targets[artifact.ID] = t
 				return j.save(r)
 			}); err != nil {

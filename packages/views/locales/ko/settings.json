@@ -1090,7 +1090,20 @@
       "verifying_rollback": "되돌리기 검증 중",
       "rolled_back": "되돌리기 완료",
       "rollback_failed": "되돌리기 실패",
-      "probing": "기기 확인 중"
+      "probing": "기기 확인 중",
+      "restoring_baseline": "Restoring baseline",
+      "verifying_baseline": "Verifying baseline",
+      "preconditions": "Switch preconditions not met",
+      "candidate_failed": "Candidate failed",
+      "baseline_recovery": "Baseline recovery",
+      "baseline_restored": "Baseline restored and verified; update failed",
+      "baseline_failed": "Baseline recovery failed; explicit retry required",
+      "retry_baseline": "Retry baseline recovery",
+      "retry_candidate": "Retry candidate update",
+      "available": "A coordinated update is available.",
+      "open_updates": "View device updates",
+      "automatic_checks": "Automatically check and prepare on this device",
+      "check_now": "Check and prepare updates"
     }
   },
   "members": {

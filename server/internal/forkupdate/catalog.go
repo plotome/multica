@@ -32,10 +32,11 @@ type Artifact struct {
 }
 
 type Catalog struct {
-	Schema    int        `json:"schema"`
-	Channel   string     `json:"channel"`
-	Sequence  uint64     `json:"sequence"`
-	Artifacts []Artifact `json:"artifacts"`
+	Source    *SourceProof `json:"source,omitempty"`
+	Schema    int          `json:"schema"`
+	Channel   string       `json:"channel"`
+	Sequence  uint64       `json:"sequence"`
+	Artifacts []Artifact   `json:"artifacts"`
 }
 
 // Payload is base64 rather than embedded JSON: signatures cover exact bytes,
@@ -46,9 +47,10 @@ type Envelope struct {
 }
 
 type Policy struct {
-	PublicKey ed25519.PublicKey
-	Channel   string
-	Origin    string
+	RequireSource bool
+	PublicKey     ed25519.PublicKey
+	Channel       string
+	Origin        string
 }
 
 type VerifiedCatalog struct {
@@ -97,8 +99,8 @@ func VerifyCatalog(data []byte, policy Policy) (VerifiedCatalog, error) {
 		return out, err
 	}
 	origin, err := url.Parse(policy.Origin)
-	if err != nil || origin.Scheme != "https" || origin.Host == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || (origin.Path != "" && origin.Path != "/") {
-		return out, errors.New("policy requires an HTTPS artifact origin")
+	if err != nil || !validUpdateOrigin(origin) || origin.Host == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || (origin.Path != "" && origin.Path != "/") {
+		return out, errors.New("policy requires HTTPS or private loopback artifact origin")
 	}
 	if policy.Channel == "" || out.Schema != 1 || out.Channel != policy.Channel || out.Sequence == 0 || out.Sequence > math.MaxInt64 || len(out.Artifacts) == 0 {
 		return out, errors.New("wrong schema, channel or empty candidate")
@@ -126,6 +128,17 @@ func VerifyCatalog(data []byte, policy Policy) (VerifiedCatalog, error) {
 			}
 		}
 	}
+	if policy.RequireSource || out.Source != nil {
+		proof := out.Source
+		if proof == nil || proof.Repository != ForkSourceURL || !commitPattern.MatchString(proof.Commit) || !digestPattern.MatchString(proof.GateSHA256) || proof.Isolation != (out.Channel == "selfhost-test") || proof.Merged == proof.Isolation {
+			return out, errors.New("trusted source and full gate proof required")
+		}
+		for _, artifact := range out.Artifacts {
+			if artifact.Commit != proof.Commit {
+				return out, errors.New("mixed source candidate inventory")
+			}
+		}
+	}
 	hash := sha256.Sum256(payload)
 	out.Digest = hex.EncodeToString(hash[:])
 	return out, nil
@@ -144,7 +157,16 @@ func VerifyArtifact(r io.Reader, artifact Artifact) error {
 		return err
 	}
 	if n != artifact.Bytes || hex.EncodeToString(h.Sum(nil)) != artifact.SHA256 {
-		return errors.New("artifact length or digest mismatch")
+		return ErrArtifactMismatch
 	}
 	return nil
 }
+
+// Native selfhost profiles already use private loopback HTTP (including local
+// tunnels). Remote artifact origins always require HTTPS. Both remain pinned,
+// authenticated and redirect-free; a feed cannot add another origin.
+func validUpdateOrigin(origin *url.URL) bool {
+	return origin.Scheme == "https" || (origin.Scheme == "http" && (origin.Hostname() == "127.0.0.1" || origin.Hostname() == "localhost" || origin.Hostname() == "::1"))
+}
+
+var ErrArtifactMismatch = errors.New("artifact length or digest mismatch")

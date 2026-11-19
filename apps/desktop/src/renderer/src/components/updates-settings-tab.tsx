@@ -19,7 +19,8 @@ export function UpdatesSettingsTab() {
   const [state, setState] = useState<CheckState>({ status: "idle" });
   const [automaticUpdates, setAutomaticUpdates] = useState(true);
   const [preferencesReady, setPreferencesReady] = useState(false);
-  const [manualMode, setManualMode] = useState(false);
+  const [coordinatedMode,setCoordinatedMode]=useState(false);
+ const [manualMode, setManualMode] = useState(false);
   const [savingPreference, setSavingPreference] = useState(false);
   const currentVersion = window.desktopAPI.appInfo.version;
 
@@ -30,7 +31,8 @@ export function UpdatesSettingsTab() {
       .then((preferences) => {
         if (mounted) {
           setAutomaticUpdates(preferences.automaticUpdates);
-          setManualMode(preferences.mode === "manual");
+ setCoordinatedMode(preferences.mode==="coordinated");
+          setManualMode(preferences.mode === "manual"||preferences.mode==="coordinated");
         }
       })
       .catch(() => {
@@ -90,7 +92,13 @@ export function UpdatesSettingsTab() {
         </SettingsRow>
 
         {manualMode ? (
+          <>
+          {coordinatedMode&&<>
+          <SettingsRow label={t(($)=>$.desktop.coordinated_updates.automatic_checks)}><Switch checked={automaticUpdates} onCheckedChange={handleAutomaticUpdatesChange} disabled={!preferencesReady||savingPreference}/></SettingsRow>
+          <SettingsRow label={t(($)=>$.desktop.coordinated_updates.check_now)}><Button variant="outline" size="sm" onClick={()=>{void (async()=>{if(!window.updater.requestForkCheck)throw new Error("Coordinated updater IPC is unavailable");await window.updater.requestForkCheck()})().catch(error=>toast.error(error instanceof Error?error.message:String(error)))}}>{t(($)=>$.desktop.coordinated_updates.check_now)}</Button></SettingsRow>
+          </>}
           <CoordinatedUpdatesPanel />
+          </>
         ) : (
           <>
             <SettingsRow

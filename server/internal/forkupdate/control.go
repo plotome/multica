@@ -35,7 +35,7 @@ func (s *ControlState) Action(action, digest, id string) error {
 // from an earlier retry or rollback command. Transport authorizes host identity.
 func (s *ControlState) ApplyReport(host, id string, report Target) error {
 	target, ok := s.Receipt.Targets[id]
-	if !ok || target.Artifact.Host != host || !reflect.DeepEqual(report.Artifact, target.Artifact) || report.Baseline != target.Baseline || report.Attempt != target.Attempt || report.Operation != target.Operation {
+	if !ok || report.CandidateDigest != s.Receipt.Digest || target.CandidateDigest != report.CandidateDigest || target.Artifact.Host != host || !reflect.DeepEqual(report.Artifact, target.Artifact) || report.Baseline != target.Baseline || report.Attempt != target.Attempt || report.Operation != target.Operation {
 		return errors.New("report is not for the approved host, candidate and operation")
 	}
 	if !s.Receipt.Approved {
@@ -47,7 +47,7 @@ func (s *ControlState) ApplyReport(host, id string, report Target) error {
 		}
 	}
 	switch report.Phase {
-	case Prepared, Downloading, Validating, Waiting, Installing, Verifying, Succeeded, Failed, RollingBack, VerifyingRollback, RolledBack:
+	case Prepared, Downloading, Validating, Waiting, Installing, Verifying, Succeeded, Failed, RollingBack, VerifyingRollback, RolledBack, Restoring, VerifyingRestore:
 	default:
 		return errors.New("unknown reported update phase")
 	}
@@ -60,6 +60,35 @@ func (s *ControlState) ApplyReport(host, id string, report Target) error {
 	if report.Phase == Failed && (report.FailureStage == "" || report.ResumePhase == "") {
 		return errors.New("failed report must retain its checkpoint")
 	}
+	if report.Recovery != nil {
+		if err := report.Recovery.Plan.Validate(report); err != nil {
+			return err
+		}
+		switch report.Recovery.Status {
+		case "prepared", "restoring", "verifying", "restored", "failed":
+		default:
+			return errors.New("unknown recovery result")
+		}
+		if report.Recovery.Status == "restored" {
+			if report.Phase != Failed || report.Recovery.CandidateError == "" || report.Observation == nil {
+				return errors.New("restoration must retain candidate failure and running baseline")
+			}
+			if err := report.Observation.Validate(report.Artifact.Kind, report.Baseline.Commit); err != nil {
+				return err
+			}
+			if err := report.Observation.ValidateVersions(report.Recovery.Plan.Baseline.Versions()); err != nil {
+				return err
+			}
+		}
+		if target.Recovery != nil && target.Phase != Prepared && target.Phase != Waiting && !reflect.DeepEqual(target.Recovery.Plan, report.Recovery.Plan) {
+			return errors.New("recovery baseline changed after installation started")
+		}
+	}
+	if report.Phase == Restoring || report.Phase == VerifyingRestore {
+		if report.Recovery == nil || report.Recovery.CandidateError == "" {
+			return errors.New("candidate failure and approved recovery snapshot required")
+		}
+	}
 	if report.Phase == Succeeded || report.Phase == RolledBack {
 		commit := report.Artifact.Commit
 		if report.Phase == RolledBack {
@@ -70,6 +99,11 @@ func (s *ControlState) ApplyReport(host, id string, report Target) error {
 		}
 		if err := report.Observation.Validate(report.Artifact.Kind, commit); err != nil {
 			return err
+		}
+		if report.Phase == Succeeded {
+			if err := report.Observation.ValidateVersions(report.Artifact.ComponentVersions); err != nil {
+				return err
+			}
 		}
 	}
 	if (target.Phase == Succeeded || target.Phase == RolledBack || target.Phase == Failed) && !reflect.DeepEqual(report, target) {

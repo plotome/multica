@@ -1347,7 +1347,20 @@
       "verifying_rollback": "回復驗收中",
       "rolled_back": "已回復",
       "rollback_failed": "回復失敗",
-      "probing": "探測裝置"
+      "probing": "探測裝置",
+      "restoring_baseline": "正在恢复原基线",
+      "verifying_baseline": "正在验收原基线",
+      "preconditions": "切换条件尚未满足",
+      "candidate_failed": "候选失败",
+      "baseline_recovery": "基线恢复结果",
+      "baseline_restored": "原基线已恢复并验证，本次更新失败",
+      "baseline_failed": "基线恢复失败，保留现场等待重试",
+      "retry_baseline": "重试基线恢复",
+      "retry_candidate": "重试候选更新",
+      "available": "新的协调更新已可查看。",
+      "open_updates": "查看设备更新",
+      "automatic_checks": "本机自动检查并准备",
+      "check_now": "检查并准备更新"
     }
   },
   "members": {

@@ -16,6 +16,7 @@ import fixPath from "fix-path";
 import { createElectronBusyInstallPrompt, setupAutoUpdater } from "./updater";
 import {
   prepareDaemonForUpdateInstall,
+ prepareCoordinatedDesktopQuit,
   resumeDaemonAfterAbortedUpdateInstall,
   setupDaemonManager,
 } from "./daemon-manager";
@@ -1057,6 +1058,7 @@ if (!gotTheLock) {
 
     // Register first so the update quit gate can block daemon autoStop.
     setupAutoUpdater(() => mainWindows.all(), {
+ coordinatedQuit:prepareCoordinatedDesktopQuit,
       // Windows only (the updater ignores it elsewhere): stop the bundled
       // daemon before the installer runs so multica.exe is replaced. #8823
       daemonGate: {

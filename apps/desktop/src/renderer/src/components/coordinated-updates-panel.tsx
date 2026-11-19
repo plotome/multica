@@ -1,3 +1,4 @@
+import {useEffect} from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   api,
@@ -17,7 +18,8 @@ export function CoordinatedUpdatesPanel() {
     queryFn: () => api.getForkUpdateState(),
     retry: false,
   });
-  const mutation = useMutation({
+ useEffect(()=>window.updater?.onForkCheck?.(()=>{void client.invalidateQueries({queryKey})}),[client]);
+ const mutation = useMutation({
     mutationFn: ({
       state,
       action,
@@ -76,7 +78,9 @@ export function CoordinatedUpdatesPanel() {
     if (phase === "install") return text.installing;
     if (phase === "rollback") return text.rolling_back;
     switch (phase) {
-      case "prepared":
+      case "restoring-baseline": return text.restoring_baseline;
+ case "verifying-baseline": return text.verifying_baseline;
+ case "prepared":
         return text.prepared;
       case "downloading":
         return text.downloading;
@@ -127,6 +131,10 @@ export function CoordinatedUpdatesPanel() {
         const id = target.artifact.id;
         const known = [
           "prepared",
+          "downloading",
+          "validating",
+          "restoring-baseline",
+          "verifying-baseline",
           "waiting",
           "installing",
           "verifying",
@@ -137,7 +145,7 @@ export function CoordinatedUpdatesPanel() {
           "rolled-back",
         ].includes(target.phase);
         const rollback =
-          target.rollback_available &&
+          target.rollback_available && (!target.recovery || target.recovery.status==="prepared") &&
           ["succeeded", "failed", "installing", "verifying"].includes(
             target.phase,
           ) &&
@@ -194,6 +202,8 @@ export function CoordinatedUpdatesPanel() {
                 </p>
               </div>
             </details>
+            {target.error && target.phase!=="failed" && !target.recovery?.candidate_error && <p role="alert" className="mt-3 text-caption text-destructive">{text.preconditions}: {target.error}</p>}
+            {target.recovery?.candidate_error && <div className="mt-3 flex flex-col gap-2 text-caption" role="status"><p className="text-destructive">{text.candidate_failed}: {target.recovery.candidate_error}</p><p>{text.baseline_recovery}: {target.recovery.status==="restored"?text.baseline_restored:target.recovery.status==="failed"?text.baseline_failed:target.recovery.status==="verifying"?text.verifying_baseline:text.restoring_baseline}</p>{target.recovery.error&&<p className="text-destructive">{target.recovery.error}</p>}</div>}
             {target.phase === "failed" && (
               <div
                 role="alert"
@@ -225,7 +235,7 @@ export function CoordinatedUpdatesPanel() {
                     disabled={mutation.isPending}
                     onClick={() => send("retry", id)}
                   >
-                    {text.retry} · {target.artifact.host} · {id}
+                    {target.recovery?.status==="failed"?text.retry_baseline:target.recovery?.status==="restored"?text.retry_candidate:text.retry} · {target.artifact.host} · {id}
                   </Button>
                 )}
                 {rollback && (

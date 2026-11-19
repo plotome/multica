@@ -15,11 +15,8 @@ import (
 )
 
 func init() {
-	for _, resume := range []bool{false, true} {
-		name := "prepare-update"
-		if resume {
-			name = "resume-update"
-		}
+	for _, entry := range []struct{ name, action string }{{"prepare-update", "prepare"}, {"resume-update", "resume"}, {"stop-for-update", "stop"}} {
+		name, action := entry.name, entry.action
 		cmd := &cobra.Command{Use: name, Short: "Hold or release the durable idle-only update maintenance gate", Args: cobra.NoArgs}
 		cmd.Flags().String("lease", "", "Updater-owned UUID, persisted with the transaction")
 		cmd.Flags().String("digest", "", "Approved candidate SHA-256 digest")
@@ -27,11 +24,11 @@ func init() {
 		for _, flag := range []string{"lease", "digest", "expected-commit"} {
 			_ = cmd.MarkFlagRequired(flag)
 		}
-		cmd.RunE = func(cmd *cobra.Command, _ []string) error { return runDaemonUpdateMaintenance(cmd, resume) }
+		cmd.RunE = func(cmd *cobra.Command, _ []string) error { return runDaemonUpdateMaintenance(cmd, action) }
 		daemonCmd.AddCommand(cmd)
 	}
 }
-func runDaemonUpdateMaintenance(cmd *cobra.Command, resume bool) error {
+func runDaemonUpdateMaintenance(cmd *cobra.Command, action string) error {
 	if err := requireHumanLocalCommand("daemon " + cmd.Name()); err != nil {
 		return err
 	}
@@ -63,10 +60,7 @@ func runDaemonUpdateMaintenance(cmd *cobra.Command, resume bool) error {
 	if !ok || pid <= 0 {
 		return fmt.Errorf("daemon PID is not attested")
 	}
-	path := "prepare"
-	if resume {
-		path = "resume"
-	}
+	path := action
 	payload, _ := json.Marshal(map[string]any{"id": lease, "digest": digest, "pid": int(pid), "commit": revision})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/updates/%s", port, path), bytes.NewReader(payload))
 	if err != nil {
@@ -95,10 +89,7 @@ func runDaemonUpdateMaintenance(cmd *cobra.Command, resume bool) error {
 	if json.Unmarshal(data, &result) != nil || result.Status != "ok" {
 		return fmt.Errorf("unrecognized maintenance acknowledgement")
 	}
-	state := "paused"
-	if resume {
-		state = "resumed"
-	}
+	state := map[string]string{"prepare": "paused", "resume": "resumed", "stop": "stopping"}[action]
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]string{"state": state, "lease": lease, "digest": digest})
 }
 func isLowerHex(value string, length int) bool {

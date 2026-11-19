@@ -1357,7 +1357,20 @@
       "verifying_rollback": "Vérification de la restauration",
       "rolled_back": "Restauré",
       "rollback_failed": "Échec de la restauration",
-      "probing": "Vérification de l’appareil"
+      "probing": "Vérification de l’appareil",
+      "restoring_baseline": "Restoring baseline",
+      "verifying_baseline": "Verifying baseline",
+      "preconditions": "Switch preconditions not met",
+      "candidate_failed": "Candidate failed",
+      "baseline_recovery": "Baseline recovery",
+      "baseline_restored": "Baseline restored and verified; update failed",
+      "baseline_failed": "Baseline recovery failed; explicit retry required",
+      "retry_baseline": "Retry baseline recovery",
+      "retry_candidate": "Retry candidate update",
+      "available": "A coordinated update is available.",
+      "open_updates": "View device updates",
+      "automatic_checks": "Automatically check and prepare on this device",
+      "check_now": "Check and prepare updates"
     }
   },
   "members": {

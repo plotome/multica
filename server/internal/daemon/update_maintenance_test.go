@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -106,5 +107,59 @@ func TestCorruptMaintenancePausesAndCannotBeOverwritten(t *testing.T) {
 	d.updateMaintenanceHandler(false).ServeHTTP(r, httptest.NewRequest("POST", "/updates/prepare", bytes.NewReader(data)))
 	if r.Code != 503 {
 		t.Fatalf("corrupt lease overwritten: %d", r.Code)
+	}
+}
+
+func TestUpdateStopRequiresExactDurableLease(t *testing.T) {
+	d := New(Config{WorkspacesRoot: t.TempDir(), MaintenanceDir: t.TempDir(), CLICommit: strings.Repeat("a", 40)}, slog.Default())
+	cancelled := make(chan struct{}, 1)
+	d.cancelFunc = func() { cancelled <- struct{}{} }
+	lease := updateMaintenanceRequest{updateLease: updateLease{ID: uuid.NewString(), Digest: strings.Repeat("b", 64)}, PID: os.Getpid(), Commit: d.cfg.CLICommit}
+	invoke := func(stop bool, request updateMaintenanceRequest) int {
+		data, _ := json.Marshal(request)
+		out := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/updates/stop", bytes.NewReader(data))
+		if stop {
+			d.updateMaintenanceStopHandler().ServeHTTP(out, req)
+		} else {
+			d.updateMaintenanceHandler(false).ServeHTTP(out, req)
+		}
+		return out.Code
+	}
+	if invoke(true, lease) != 409 {
+		t.Fatal("unprepared daemon stopped")
+	}
+	if invoke(false, lease) != 200 {
+		t.Fatal("prepare failed")
+	}
+	for _, field := range []string{"lease", "pid", "commit"} {
+		wrong := lease
+		switch field {
+		case "lease":
+			wrong.ID = uuid.NewString()
+		case "pid":
+			wrong.PID++
+		case "commit":
+			wrong.Commit = strings.Repeat("c", 40)
+		}
+		if invoke(true, wrong) != 409 {
+			t.Fatal("foreign stop accepted", field)
+		}
+	}
+	select {
+	case <-cancelled:
+		t.Fatal("unauthorized cancellation")
+	default:
+	}
+	if invoke(true, lease) != 200 {
+		t.Fatal("verified stop rejected")
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("verified stop did not cancel")
+	}
+	if _, err := os.Stat(d.updateLeasePath()); err != nil {
+		t.Fatal("stop lost durable gate", err)
 	}
 }

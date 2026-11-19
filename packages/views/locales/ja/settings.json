@@ -1347,7 +1347,20 @@
       "verifying_rollback": "復元を検証中",
       "rolled_back": "復元済み",
       "rollback_failed": "復元に失敗",
-      "probing": "デバイスを確認中"
+      "probing": "デバイスを確認中",
+      "restoring_baseline": "Restoring baseline",
+      "verifying_baseline": "Verifying baseline",
+      "preconditions": "Switch preconditions not met",
+      "candidate_failed": "Candidate failed",
+      "baseline_recovery": "Baseline recovery",
+      "baseline_restored": "Baseline restored and verified; update failed",
+      "baseline_failed": "Baseline recovery failed; explicit retry required",
+      "retry_baseline": "Retry baseline recovery",
+      "retry_candidate": "Retry candidate update",
+      "available": "A coordinated update is available.",
+      "open_updates": "View device updates",
+      "automatic_checks": "Automatically check and prepare on this device",
+      "check_now": "Check and prepare updates"
     }
   },
   "members": {

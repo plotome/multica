@@ -2793,8 +2793,8 @@ export class ApiClient {
     });
   }
 
-  async getForkUpdateState(): Promise<ForkUpdateResponse | null> {
-    const raw = await this.fetch<unknown>("/api/fork-updates");
+  async getForkUpdateState(refreshCatalog=true): Promise<ForkUpdateResponse | null> {
+    const raw = await this.fetch<unknown>(refreshCatalog?"/api/fork-updates":"/api/fork-updates?catalog_refresh=0");
     return parseWithFallback<ForkUpdateResponse | null>(raw, ForkUpdateResponseSchema, null, {
       endpoint: "GET /api/fork-updates",
     });

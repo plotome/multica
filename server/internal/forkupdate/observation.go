@@ -50,3 +50,22 @@ func (o Observation) Validate(kind, commit string) error {
 	}
 	return nil
 }
+
+func (o Observation) ValidateVersions(expected map[string]string) error {
+	if len(expected) != len(o.Components) {
+		return errors.New("running version inventory differs")
+	}
+	for _, component := range o.Components {
+		if expected[component.Kind] != component.Version {
+			return errors.New("running component version differs from the pinned build")
+		}
+	}
+	return nil
+}
+func (o Observation) Versions() map[string]string {
+	result := map[string]string{}
+	for _, component := range o.Components {
+		result[component.Kind] = component.Version
+	}
+	return result
+}

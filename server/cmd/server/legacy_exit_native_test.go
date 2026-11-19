@@ -224,6 +224,12 @@ func runNativeOldDaemonCase(t *testing.T, scenario string) {
 		testPool.Exec(ctx, `DELETE FROM device_maintenance_event WHERE daemon_id=$1`, device)
 	})
 	input, _ := json.Marshal(map[string]string{"backend": backend.URL, "token": token, "workspace": workspace, "device": device, "binary": binary, "sha256": expected, "scenario": scenario})
+	if strings.HasPrefix(scenario, "bootout-") {
+		if os.Getenv("NATIVE_EXIT_SCENES") == "" {
+			t.Fatal("durable small scene directory required")
+		}
+		input, _ = json.Marshal(map[string]string{"backend": backend.URL, "token": token, "workspace": workspace, "device": device, "binary": binary, "sha256": expected, "scenario": scenario, "scene_root": os.Getenv("NATIVE_EXIT_SCENES")})
+	}
 	cmd := exec.Command(python, runner)
 	cmd.Stdin = strings.NewReader(string(input))
 	output, e := cmd.CombinedOutput()

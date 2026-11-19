@@ -24,6 +24,12 @@ import (
 )
 
 func TestForkUpdateOwnerApprovalPersistsAndMachineActorsCannotApprove(t *testing.T) {
+	runForkNativeAuth(t, false)
+}
+func TestForkUpdateNativeAuthRecoveryResultAndExplicitRemoteRetry(t *testing.T) {
+	runForkNativeAuth(t, true)
+}
+func runForkNativeAuth(t *testing.T, recoveryCase bool) {
 	if testHandler == nil {
 		t.Skip("disposable database required")
 	}
@@ -165,6 +171,40 @@ func TestForkUpdateOwnerApprovalPersistsAndMachineActorsCannotApprove(t *testing
 		t.Fatal(err)
 	}
 	driver.busy = false
+	expectedInstalls := 1
+	if recoveryCase {
+		driver.failVerify = true
+		if err := consumer.Tick(context.Background()); err == nil {
+			t.Fatal("candidate failure hidden")
+		}
+		restored, err := store.Latest(context.Background(), testWorkspaceID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := restored.Receipt.Targets["unit"]
+		if result.Phase != forkupdate.Failed || result.Recovery.Status != "restored" || result.Observation.Components[0].Commit != result.Baseline.Commit {
+			t.Fatal("native authenticated restoration result missing")
+		}
+		if err := consumer.Tick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if driver.installs != 1 {
+			t.Fatal("result redelivery reinstalled candidate")
+		}
+		actionBytes, _ = json.Marshal(map[string]any{"action": "retry", "digest": restored.Receipt.Digest, "revision": restored.Revision, "target": "unit"})
+		req, _ := http.NewRequest(http.MethodPost, apiServer.URL+"/api/fork-updates/action", bytes.NewReader(actionBytes))
+		req.Header.Set("Authorization", "Bearer "+ownerPAT)
+		response, err := apiServer.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatal("native owner retry rejected", response.StatusCode)
+		}
+		driver.failVerify = false
+		expectedInstalls = 2
+	}
 	if err := consumer.Tick(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +212,7 @@ func TestForkUpdateOwnerApprovalPersistsAndMachineActorsCannotApprove(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !state.Receipt.Complete() || driver.installs != 1 {
+	if !state.Receipt.Complete() || driver.installs != expectedInstalls {
 		t.Fatal("HTTP consumer result was not persisted")
 	}
 	// After the operation completes, an invalid incoming catalog is visible;
@@ -180,7 +220,7 @@ func TestForkUpdateOwnerApprovalPersistsAndMachineActorsCannotApprove(t *testing
 	if err := consumer.Tick(context.Background()); err == nil {
 		t.Fatal("invalid incoming catalog was hidden")
 	}
-	if driver.installs != 1 {
+	if driver.installs != expectedInstalls {
 		t.Fatal("catalog failure repeated completed install")
 	}
 	if err := os.WriteFile(catalogPath, envelope, 0600); err != nil {
@@ -190,15 +230,16 @@ func TestForkUpdateOwnerApprovalPersistsAndMachineActorsCannotApprove(t *testing
 	if err := consumer.Tick(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if driver.installs != 1 {
+	if driver.installs != expectedInstalls {
 		t.Fatal("completed install repeated")
 	}
 }
 
 type forkHandlerDriver struct {
-	path     string
-	busy     bool
-	installs int
+	path       string
+	busy       bool
+	installs   int
+	failVerify bool
 }
 
 func (d *forkHandlerDriver) Probe(context.Context, forkupdate.Target) (forkupdate.Probe, error) {
@@ -209,6 +250,9 @@ func (d *forkHandlerDriver) Install(_ context.Context, target forkupdate.Target)
 	return os.WriteFile(d.path, []byte(target.Artifact.Commit), 0600)
 }
 func (d *forkHandlerDriver) Verify(_ context.Context, target forkupdate.Target) (forkupdate.Observation, error) {
+	if d.failVerify {
+		return forkupdate.Observation{}, fmt.Errorf("candidate readiness failed")
+	}
 	return d.observe(target.Artifact.Commit)
 }
 func (d *forkHandlerDriver) Rollback(_ context.Context, target forkupdate.Target) error {
@@ -231,7 +275,7 @@ func (d *forkHandlerDriver) observe(commit string) (forkupdate.Observation, erro
 func (d *forkHandlerDriver) PrepareRecovery(_ context.Context, target forkupdate.Target) (forkupdate.RecoveryPlan, error) {
 	observation := forkupdate.Observation{At: time.Now().UTC().Format(time.RFC3339Nano)}
 	for _, kind := range forkupdate.ExpectedComponents(target.Artifact.Kind) {
-		observation.Components = append(observation.Components, forkupdate.InstalledComponent{Kind: kind, Version: "fixture baseline", Commit: target.Baseline.Commit})
+		observation.Components = append(observation.Components, forkupdate.InstalledComponent{Kind: kind, Version: "2.0", Commit: target.Baseline.Commit})
 	}
 	return forkupdate.RecoveryPlan{CandidateCommit: target.Artifact.Commit, BaselineCommit: target.Baseline.Commit, AssetsSHA256: strings.Repeat("c", 64), CompatibilitySHA256: strings.Repeat("d", 64), ForwardCompatible: true, BackwardCompatible: true, Baseline: observation}, nil
 }

@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
-import { AlertCircle, ArrowDownToLine, Check, Loader2 } from "@multica/ui/icons";
+import {
+  AlertCircle,
+  ArrowDownToLine,
+  Check,
+  Loader2,
+} from "@multica/ui/icons";
 import { Button } from "@multica/ui/components/ui/button";
 import { Switch } from "@multica/ui/components/ui/switch";
 import { useT } from "@multica/views/i18n";
-import { SettingsCard, SettingsRow, SettingsTab } from "@multica/views/settings";
+import {
+  SettingsCard,
+  SettingsRow,
+  SettingsTab,
+} from "@multica/views/settings";
 import { toast } from "sonner";
 import { CoordinatedUpdatesPanel } from "./coordinated-updates-panel";
 
@@ -19,8 +28,8 @@ export function UpdatesSettingsTab() {
   const [state, setState] = useState<CheckState>({ status: "idle" });
   const [automaticUpdates, setAutomaticUpdates] = useState(true);
   const [preferencesReady, setPreferencesReady] = useState(false);
-  const [coordinatedMode,setCoordinatedMode]=useState(false);
- const [manualMode, setManualMode] = useState(false);
+  const [coordinatedMode, setCoordinatedMode] = useState(false);
+  const [manualMode, setManualMode] = useState(false);
   const [savingPreference, setSavingPreference] = useState(false);
   const currentVersion = window.desktopAPI.appInfo.version;
 
@@ -31,8 +40,10 @@ export function UpdatesSettingsTab() {
       .then((preferences) => {
         if (mounted) {
           setAutomaticUpdates(preferences.automaticUpdates);
- setCoordinatedMode(preferences.mode==="coordinated");
-          setManualMode(preferences.mode === "manual"||preferences.mode==="coordinated");
+          setCoordinatedMode(preferences.mode === "coordinated");
+          setManualMode(
+            preferences.mode === "manual" || preferences.mode === "coordinated",
+          );
         }
       })
       .catch(() => {
@@ -54,9 +65,12 @@ export function UpdatesSettingsTab() {
       try {
         const preferences = await window.updater.setAutomaticUpdates(enabled);
         setAutomaticUpdates(preferences.automaticUpdates);
-        toast.success(t(($) => $.auto_save.toast_saved), {
-          id: "settings-auto-save",
-        });
+        toast.success(
+          t(($) => $.auto_save.toast_saved),
+          {
+            id: "settings-auto-save",
+          },
+        );
       } catch {
         toast.error(t(($) => $.desktop.updates.automatic_updates_save_failed));
       } finally {
@@ -81,9 +95,7 @@ export function UpdatesSettingsTab() {
   }, []);
 
   return (
-    <SettingsTab
-      title={t(($) => $.desktop.updates.title)}
-    >
+    <SettingsTab title={t(($) => $.desktop.updates.title)}>
       <SettingsCard>
         <SettingsRow label={t(($) => $.desktop.updates.current_version)}>
           <span className="font-mono text-caption text-muted-foreground">
@@ -93,17 +105,55 @@ export function UpdatesSettingsTab() {
 
         {manualMode ? (
           <>
-          {coordinatedMode&&<>
-          <SettingsRow label={t(($)=>$.desktop.coordinated_updates.automatic_checks)}><Switch checked={automaticUpdates} onCheckedChange={handleAutomaticUpdatesChange} disabled={!preferencesReady||savingPreference}/></SettingsRow>
-          <SettingsRow label={t(($)=>$.desktop.coordinated_updates.check_now)}><Button variant="outline" size="sm" onClick={()=>{void (async()=>{if(!window.updater.requestForkCheck)throw new Error("Coordinated updater IPC is unavailable");await window.updater.requestForkCheck()})().catch(error=>toast.error(error instanceof Error?error.message:String(error)))}}>{t(($)=>$.desktop.coordinated_updates.check_now)}</Button></SettingsRow>
-          </>}
-          <CoordinatedUpdatesPanel />
+            {coordinatedMode && (
+              <>
+                <SettingsRow
+                  label={t(
+                    ($) => $.desktop.coordinated_updates.automatic_checks,
+                  )}
+                >
+                  <Switch
+                    checked={automaticUpdates}
+                    onCheckedChange={handleAutomaticUpdatesChange}
+                    disabled={!preferencesReady || savingPreference}
+                  />
+                </SettingsRow>
+                <SettingsRow
+                  label={t(($) => $.desktop.coordinated_updates.check_now)}
+                >
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      void (async () => {
+                        if (!window.updater.requestForkCheck)
+                          throw new Error(
+                            "Coordinated updater IPC is unavailable",
+                          );
+                        await window.updater.requestForkCheck();
+                      })().catch((error) =>
+                        toast.error(
+                          error instanceof Error
+                            ? error.message
+                            : String(error),
+                        ),
+                      );
+                    }}
+                  >
+                    {t(($) => $.desktop.coordinated_updates.check_now)}
+                  </Button>
+                </SettingsRow>
+              </>
+            )}
+            <CoordinatedUpdatesPanel />
           </>
         ) : (
           <>
             <SettingsRow
               label={t(($) => $.desktop.updates.automatic_updates_title)}
-              description={t(($) => $.desktop.updates.automatic_updates_description)}
+              description={t(
+                ($) => $.desktop.updates.automatic_updates_description,
+              )}
             >
               <Switch
                 checked={automaticUpdates}

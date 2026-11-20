@@ -155,14 +155,14 @@ type terminalReply struct {
 	fallbackFreshSend bool
 	plainTextFallback bool
 	plainTextEdit     bool
-	kind            terminalKind
-	settleReason    string
-	turn            replyTurn
-	turnResolved    bool
-	lease           *deliveryLease
-	acquireAttempts int
-	editAttempts    int
-	cleanupOnce     sync.Once
+	kind              terminalKind
+	settleReason      string
+	turn              replyTurn
+	turnResolved      bool
+	lease             *deliveryLease
+	acquireAttempts   int
+	editAttempts      int
+	cleanupOnce       sync.Once
 }
 
 // terminalKind is what a queued item delivers. All three take the turn's lease
@@ -462,7 +462,7 @@ func (o *Outbound) pushPartial(ctx context.Context, target *replyTarget, st *str
 		// stalling — a slow query, a descheduled goroutine — can outlive the
 		// lease, and an edit made afterwards overwrites whatever the process
 		// that took over has already published as the final answer.
-		if !o.renewDelivery(ctx, lease) {
+		if owned, err := o.renewDelivery(ctx, lease); err != nil || !owned {
 			return
 		}
 		ctx, cancel := o.callContext(ctx)
@@ -484,7 +484,7 @@ func (o *Outbound) pushPartial(ctx context.Context, target *replyTarget, st *str
 	// Exactly one placeholder per turn, published before the call goes out so
 	// that any other process reads "a send is outstanding" rather than
 	// "nothing has been sent".
-	if !o.claimSend(ctx, lease) {
+	if claimed, err := o.claimSend(ctx, lease); err != nil || !claimed {
 		return
 	}
 	ctx, cancel := o.callContext(ctx)
@@ -762,7 +762,12 @@ func (o *Outbound) sendNextTerminalRequest(ctx context.Context, reply *terminalR
 	// Re-prove ownership before every call. A turn is held across several
 	// scheduler rounds — edit pacing, a 429 backoff — and a lease taken
 	// minutes ago is not evidence that this process still owns the reply.
-	if !o.renewDelivery(ctx, reply.lease) {
+	if owned, err := o.renewDelivery(ctx, reply.lease); err != nil {
+		// A failed database round trip is not evidence of lost ownership.
+		// Keep any durable in-flight fence; replay must not guess whether a
+		// timed-out write committed and must never duplicate a provider call.
+		return terminalRequestResult{done: true, err: fmt.Errorf("renewDelivery: %w", err)}
+	} else if !owned {
 		o.logger.WarnContext(ctx, "telegram outbound: lost the reply to another process mid-delivery",
 			"turn_id", uuidText(reply.turn.id))
 		return terminalRequestResult{done: true}
@@ -782,7 +787,12 @@ func (o *Outbound) sendNextTerminalRequest(ctx context.Context, reply *terminalR
 	// Re-prove the turn here, not only at the top: waiting for schedule.mu can
 	// take arbitrarily long, and the call below must be authorised by a lease
 	// that is still ours at the moment it goes out.
-	if !o.renewDelivery(ctx, reply.lease) {
+	if owned, err := o.renewDelivery(ctx, reply.lease); err != nil {
+		// A failed database round trip is not evidence of lost ownership.
+		// Keep any durable in-flight fence; replay must not guess whether a
+		// timed-out write committed and must never duplicate a provider call.
+		return terminalRequestResult{done: true, err: fmt.Errorf("renewDelivery: %w", err)}
+	} else if !owned {
 		return terminalRequestResult{done: true}
 	}
 	ctx, cancel := o.callContext(ctx)
@@ -1021,7 +1031,12 @@ func (o *Outbound) sendReplyChunk(ctx context.Context, api *botAPI, reply *termi
 		params.Text = chunk
 		params.ParseMode = ""
 	}
-	if !o.claimSend(ctx, reply.lease) {
+	if owned, err := o.claimSend(ctx, reply.lease); err != nil {
+		// A failed database round trip is not evidence of lost ownership.
+		// Keep any durable in-flight fence; replay must not guess whether a
+		// timed-out write committed and must never duplicate a provider call.
+		return terminalRequestResult{done: true, err: fmt.Errorf("claimSend: %w", err)}
+	} else if !owned {
 		// Either the turn moved on, or an earlier send is still unaccounted
 		// for. Neither is a reason to put another message in the chat.
 		return terminalRequestResult{done: true}
@@ -1116,7 +1131,12 @@ func (o *Outbound) deliverFailureNotice(ctx context.Context, reply *terminalRepl
 	if available := o.terminalAvailableAt(schedule, target.botKey, now); available.After(now) {
 		return terminalRequestResult{retryAt: available}
 	}
-	if !o.renewDelivery(ctx, lease) {
+	if owned, err := o.renewDelivery(ctx, lease); err != nil {
+		// A failed database round trip is not evidence of lost ownership.
+		// Keep any durable in-flight fence; replay must not guess whether a
+		// timed-out write committed and must never duplicate a provider call.
+		return terminalRequestResult{done: true, err: fmt.Errorf("renewDelivery: %w", err)}
+	} else if !owned {
 		return terminalRequestResult{done: true}
 	}
 	ctx, cancel := o.callContext(ctx)
@@ -1126,7 +1146,12 @@ func (o *Outbound) deliverFailureNotice(ctx context.Context, reply *terminalRepl
 	if messageID := lease.messageID(); messageID != 0 && !reply.fallbackFreshSend {
 		return o.editNoticeOntoPlaceholder(ctx, api, reply, schedule, messageID)
 	}
-	if !o.claimSend(ctx, lease) {
+	if owned, err := o.claimSend(ctx, lease); err != nil {
+		// A failed database round trip is not evidence of lost ownership.
+		// Keep any durable in-flight fence; replay must not guess whether a
+		// timed-out write committed and must never duplicate a provider call.
+		return terminalRequestResult{done: true, err: fmt.Errorf("claimSend: %w", err)}
+	} else if !owned {
 		return terminalRequestResult{done: true}
 	}
 	sent, sendErr := api.SendMessage(ctx, sendMessageParams{

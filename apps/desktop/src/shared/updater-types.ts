@@ -1,6 +1,6 @@
 export interface UpdaterPreferences {
   automaticUpdates: boolean;
-  mode?: "manual";
+  mode?: "manual" | "coordinated";
 }
 
 export type ManualUpdateCheckResult =

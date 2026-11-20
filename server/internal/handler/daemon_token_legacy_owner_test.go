@@ -26,15 +26,22 @@ type legacyTokenFixture struct {
 	taskID    string
 }
 
-func newLegacyTokenFixture(t *testing.T, label string) legacyTokenFixture {
+func newLegacyTokenFixture(t *testing.T, label string, runtimeCols ...testutil.Cols) legacyTokenFixture {
 	t.Helper()
 	ctx := context.Background()
 	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
 	f := legacyTokenFixture{daemonID: "legacy-" + label + "-" + suffix}
-	f.runtimeID = dbfx.Runtime(t, label+" legacy runtime", testutil.Cols{
+	cols := testutil.Cols{
 		"daemon_id": f.daemonID,
 		"provider":  "claude",
-	})
+	}
+	for _, overrides := range runtimeCols {
+		for key, value := range overrides {
+			cols[key] = value
+		}
+	}
+	f.runtimeID = dbfx.Runtime(t, label+" legacy runtime", cols)
+	f.daemonID = cols["daemon_id"].(string)
 	agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, f.runtimeID, label+" legacy agent")
 	f.taskID = dbfx.Task(t, agentID, testutil.Cols{
 		"runtime_id": f.runtimeID,
@@ -140,8 +147,7 @@ func TestLegacyDaemonToken_RefusedWithoutSingleProvableOwner(t *testing.T) {
 
 	t.Run("ambiguous owners at the same timestamp", func(t *testing.T) {
 		f := newLegacyTokenFixture(t, "ambig")
-		g := newLegacyTokenFixture(t, "ambig2")
-		dbfx.Exec(t, `UPDATE agent_runtime SET daemon_id = $1, provider = 'codex' WHERE id = $2`, f.daemonID, g.runtimeID)
+		g := newLegacyTokenFixture(t, "ambig2", testutil.Cols{"daemon_id": f.daemonID, "provider": "codex"})
 		other := dbfx.User(t, "legacy other", "legacy-other-"+uuid.NewString()+"@example.com")
 		dbfx.Member(t, testWorkspaceID, other, "member")
 		raw := mintLegacyClaimTokens(t, f.daemonID,

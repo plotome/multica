@@ -1,0 +1,138 @@
+import { afterEach, expect, it, vi } from "vitest";
+import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { createConnection, type Server } from "node:net";
+import {
+  createForkControlServer,
+  parseForkControlPolicy,
+  readPrivateJSON,
+  type ForkControlPolicy,
+} from "./fork-update-control";
+const roots: string[] = [];
+const servers: Server[] = [];
+afterEach(async () => {
+  await Promise.all(
+    servers
+      .splice(0)
+      .map(
+        (server) =>
+          new Promise<void>((resolve) => server.close(() => resolve())),
+      ),
+  );
+  for (const root of roots.splice(0))
+    await rm(root, { recursive: true, force: true });
+});
+async function fixture() {
+  const root = await mkdtemp(join(tmpdir(), "fork-control-"));
+  roots.push(root);
+  const secret = join(root, "secret");
+  await writeFile(secret, "a".repeat(64), { mode: 0o600 });
+  const p: ForkControlPolicy = {
+    profile: "isolated",
+    socket: join(root, "control.sock"),
+    secret_file: secret,
+    worker_config: join(root, "worker.json"),
+    launchd_label: "com.ploto.multica.updater.abc123",
+    request_limit_bytes: 2048,
+    request_timeout_ms: 1000,
+  };
+  return { root, policy: p };
+}
+function send(
+  policy: ForkControlPolicy,
+  request: unknown,
+): Promise<{ ok: boolean }> {
+  return new Promise((resolve, reject) => {
+    const client = createConnection(policy.socket);
+    let data = "";
+    client.on("connect", () => client.end(JSON.stringify(request) + "\n"));
+    client.on("data", (chunk) => (data += chunk));
+    client.on("error", reject);
+    client.on("end", () => {
+      try {
+        resolve(JSON.parse(data));
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+}
+const request = {
+  action: "quit-for-update",
+  secret: "a".repeat(64),
+  lease: "11111111-1111-4111-8111-111111111111",
+  digest: "b".repeat(64),
+};
+it("requires the private secret and a successful idle lease before app quit", async () => {
+  const { policy } = await fixture();
+  const prepare = vi.fn(async () => {}),
+    quit = vi.fn();
+  const server = await createForkControlServer(policy, prepare, quit);
+  servers.push(server);
+  expect(await send(policy, { ...request, secret: "c".repeat(64) })).toEqual({
+    ok: false,
+  });
+  expect(prepare).not.toHaveBeenCalled();
+  expect(quit).not.toHaveBeenCalled();
+  expect(await send(policy, request)).toEqual({ ok: true });
+  await vi.waitFor(() => expect(quit).toHaveBeenCalledTimes(1));
+  expect(prepare).toHaveBeenCalledWith(
+    policy.profile,
+    request.lease,
+    request.digest,
+  );
+});
+it("keeps Desktop alive when daemon identity or lease verification fails", async () => {
+  const { policy } = await fixture();
+  const quit = vi.fn();
+  servers.push(
+    await createForkControlServer(
+      policy,
+      async () => {
+        throw new Error("busy or wrong profile");
+      },
+      quit,
+    ),
+  );
+  expect(await send(policy, request)).toEqual({ ok: false });
+  expect(quit).not.toHaveBeenCalled();
+});
+it("does not unlink another live control server", async () => {
+  const { policy } = await fixture();
+  servers.push(
+    await createForkControlServer(
+      policy,
+      async () => {},
+      () => {},
+    ),
+  );
+  await expect(
+    createForkControlServer(
+      policy,
+      async () => {},
+      () => {},
+    ),
+  ).rejects.toThrow("already active");
+});
+it("rejects nonprivate policy and an occupied ordinary file", async () => {
+  const { root, policy } = await fixture();
+  const path = join(root, "policy.json");
+  await writeFile(path, "{}", { mode: 0o644 });
+  await expect(readPrivateJSON(path)).rejects.toThrow("private");
+  await writeFile(policy.socket, "do not replace");
+  await expect(
+    createForkControlServer(
+      policy,
+      async () => {},
+      () => {},
+    ),
+  ).rejects.toThrow("occupied");
+  expect(await readFile(policy.socket, "utf8")).toBe("do not replace");
+  expect(() =>
+    parseForkControlPolicy({
+      ...policy,
+      launchd_label: "com.ploto.multica.daemon",
+    }),
+  ).toThrow();
+});

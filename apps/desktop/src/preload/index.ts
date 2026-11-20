@@ -364,6 +364,8 @@ const daemonAPI = {
 };
 
 const updaterAPI = {
+ requestForkCheck:():Promise<void>=>ipcRenderer.invoke("updater:fork-check"),
+ onForkCheck:(callback:()=>void)=>{const handler=()=>callback();ipcRenderer.on("updater:fork-check",handler);return ()=>ipcRenderer.removeListener("updater:fork-check",handler)},
   onUpdateAvailable: (callback: (info: { version: string; releaseNotes?: string }) => void) => {
     const handler = (_: unknown, info: { version: string; releaseNotes?: string }) => callback(info);
     ipcRenderer.on("updater:update-available", handler);

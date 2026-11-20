@@ -156,12 +156,15 @@
       ]
     },
     {
-      "id": "manual-desktop-maintenance",
+      "id": "coordinated-desktop-maintenance",
       "introduced_by": "460acdfead413f9f4db85e8e1f72be5fda75cca2",
       "required_files": [
         "apps/desktop/src/main/updater.ts",
         "apps/desktop/src/main/updater.test.ts",
         "apps/desktop/src/main/update-install-lifecycle.test.ts",
+        "apps/desktop/src/main/coordinated-updater.ts",
+        "apps/desktop/src/main/coordinated-updater.test.ts",
+        "server/internal/forkupdate/recovery_test.go",
         "apps/desktop/src/renderer/src/components/updates-settings-tab.test.tsx",
         "apps/desktop/scripts/bundle-cli.node-test.mjs",
         "server/cmd/multica/cmd_version_test.go"
@@ -171,7 +174,9 @@
         "apps/desktop/src/main/cli-release-asset.test.ts"
       ],
       "required_tests": [
-        "TestVersionJSONIncludesExactBuildCommit"
+        "TestVersionJSONIncludesExactBuildCommit",
+        "TestCandidateFailureRestoresBaselineAndRemainsFailed",
+        "TestRestorationResumesAfterUpdaterProcessDeath"
       ]
     },
     {

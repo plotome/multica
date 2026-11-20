@@ -75,7 +75,7 @@ else if (args[0] === "build") {
         assert.equal(identity.commit, missingRevision ? "" : fullRevision);
         assert.equal(identity.platform, platform);
         assert.equal(identity.arch, arch);
-        assert.equal(identity.update_mode, "manual");
+        assert.equal(identity.update_mode, "coordinated");
         assert.equal(identity.source_clean, true);
       } finally {
         rmSync(root, { recursive: true, force: true });

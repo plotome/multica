@@ -365,6 +365,21 @@ migrate-down: ## Create the target DB if needed, then roll back database migrati
 sqlc: ## Regenerate sqlc code
 	cd server && go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate
 
+.PHONY: test-device-maintenance
+test-device-maintenance: ## Real device-fence transactions in this checkout's existing isolated database
+	$(REQUIRE_ENV)
+	@bash scripts/test-device-maintenance.sh
+
+.PHONY: test-device-maintenance-consumer
+test-device-maintenance-consumer: ## Cross-repository consumer against the real isolated device API/database
+	$(REQUIRE_ENV)
+	@DEVICE_CONSUMER_PYTHON="$(consumer_python)" DEVICE_CONSUMER_SCRIPT="$(consumer_script)" bash scripts/test-device-maintenance.sh --consumer
+
+.PHONY: test-legacy-native-exit
+test-legacy-native-exit: ## Original installed daemon, fresh test identity, isolated backend only
+	$(REQUIRE_ENV)
+	@NATIVE_OLD_CLI="$(old_cli)" NATIVE_OLD_SHA256="$(old_sha256)" NATIVE_EXIT_PYTHON="$(consumer_python)" NATIVE_EXIT_RUNNER="$(consumer_script)" bash scripts/test-device-maintenance.sh --legacy-native
+
 # Cleanup
 ##@ Cleanup
 

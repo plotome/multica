@@ -186,6 +186,8 @@ function sendStatus(status: DaemonStatus): void {
 }
 
 interface HealthPayload {
+ update_paused?:boolean;
+ cli_commit?:string;
   status?: string;
   pid?: number;
   profile?: string;
@@ -1677,4 +1679,18 @@ export function setupDaemonManager(
     }
     handleQuit(event);
   });
+}
+
+// Called only by the private local updater socket after the independent worker
+// acquired its durable lease. Quit the app itself, preserving daemon ownership.
+export async function prepareCoordinatedDesktopQuit(profile:string,lease:string,digest:string):Promise<void>{
+ await lifecycleOperations.runForeground(async()=>{
+  const active=await ensureActiveProfile();
+  if(!active||active.name!==profile)throw new Error("Updater targets another Desktop profile");
+  const held=JSON.parse(await readFile(join(profileDir(profile),"update-lease.json"),"utf8")) as {id?:string;digest?:string};
+  const health=await fetchProfileHealth(active);
+  if(held.id!==lease||held.digest!==digest||health?.profile!==profile||health.update_paused!==true||health.active_task_count!==0||!/^([a-f0-9]{40})$/.test(health.cli_commit??""))throw new Error("Verified idle update lease is not held");
+  desiredRunningBeforeUpdateStop??=desiredDaemonRunning;
+  setDesiredDaemonRunning(false);quitting=true;stopPolling();stopLogTail();
+ });
 }

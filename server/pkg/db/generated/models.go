@@ -754,6 +754,27 @@ type DaemonToken struct {
 	OwnerID     pgtype.UUID        `json:"owner_id"`
 }
 
+type DeviceMaintenance struct {
+	DaemonID      string             `json:"daemon_id"`
+	Lease         pgtype.UUID        `json:"lease"`
+	Digest        string             `json:"digest"`
+	Generation    pgtype.UUID        `json:"generation"`
+	DeviceOwner   pgtype.UUID        `json:"device_owner"`
+	ActorID       pgtype.UUID        `json:"actor_id"`
+	WorkspaceIds  []pgtype.UUID      `json:"workspace_ids"`
+	AdmittedTasks []pgtype.UUID      `json:"admitted_tasks"`
+	ServerDrained bool               `json:"server_drained"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+type DeviceMaintenanceEvent struct {
+	ID        int64              `json:"id"`
+	DaemonID  string             `json:"daemon_id"`
+	Action    string             `json:"action"`
+	Body      []byte             `json:"body"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 type DingtalkBotIdentity struct {
 	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
 	InstallationID   pgtype.UUID        `json:"installation_id"`
@@ -796,6 +817,14 @@ type Feedback struct {
 	Message     string             `json:"message"`
 	Metadata    []byte             `json:"metadata"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type ForkUpdateRollout struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Digest      string      `json:"digest"`
+	Sequence    int64       `json:"sequence"`
+	Body        []byte      `json:"body"`
+	Revision    int64       `json:"revision"`
 }
 
 type GithubInstallation struct {

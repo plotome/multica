@@ -1,12 +1,11 @@
+import { ForkUpdateNotification } from "./fork-update-notification";
 import { useEffect, useState } from "react";
 import { RefreshCw, X } from "@multica/ui/icons";
 
 // Downloads run silently in the background (main process has
 // autoDownload=true). The renderer only renders UI once the package is fully
 // downloaded and waiting for a restart.
-type UpdateState =
-  | { status: "idle" }
-  | { status: "ready"; version: string };
+type UpdateState = { status: "idle" } | { status: "ready"; version: string };
 
 function changelogUrl(version: string): string {
   return `https://multica.ai/changelog#release-${version.replace(/\./g, "-")}`;
@@ -14,8 +13,29 @@ function changelogUrl(version: string): string {
 
 export function UpdateNotification() {
   const [state, setState] = useState<UpdateState>({ status: "idle" });
+  const [forkMode, setForkMode] = useState<{ automaticChecks: boolean } | null>(
+    null,
+  );
   const [dismissed, setDismissed] = useState(false);
 
+  useEffect(() => {
+    let active = true;
+    const refresh = () => {
+      void window.updater
+        .getPreferences?.()
+        .then((p) => {
+          if (active && p.mode === "coordinated")
+            setForkMode({ automaticChecks: p.automaticUpdates });
+        })
+        .catch(() => {});
+    };
+    refresh();
+    const dispose = window.updater.onForkCheck?.(refresh);
+    return () => {
+      active = false;
+      dispose?.();
+    };
+  }, []);
   useEffect(() => {
     const cleanup = window.updater.onUpdateDownloaded((info) => {
       setState({ status: "ready", version: info.version });
@@ -24,6 +44,10 @@ export function UpdateNotification() {
     return cleanup;
   }, []);
 
+  if (forkMode)
+    return (
+      <ForkUpdateNotification automaticChecks={forkMode.automaticChecks} />
+    );
   if (state.status === "idle") return null;
   if (dismissed) return null;
 

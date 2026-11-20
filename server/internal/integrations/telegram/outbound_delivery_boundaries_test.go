@@ -157,8 +157,8 @@ func TestReview8545PostgresAbandonedInFlightDoesNotBlockForever(t *testing.T) {
 	if err != nil || status != deliveryAcquired {
 		t.Fatalf("delivery not acquired: status=%v err=%v", status, err)
 	}
-	if !o.claimSend(ctx, lease) {
-		t.Fatal("send not claimed")
+	if claimed, err := o.claimSend(ctx, lease); err != nil || !claimed {
+		t.Fatalf("send not claimed: %v", err)
 	}
 	// The owner process dies after claiming: it never records an outcome and
 	// never releases the turn. Only the lease expiring can free it.

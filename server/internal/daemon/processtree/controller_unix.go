@@ -30,7 +30,7 @@ func (*controller) interrupt(cmd *exec.Cmd) error {
 		return os.ErrProcessDone
 	}
 	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
+		if groupHasFinished(cmd.Process.Pid, err) {
 			return nil
 		}
 		return err
@@ -43,7 +43,7 @@ func (*controller) stop(cmd *exec.Cmd) error {
 		return os.ErrProcessDone
 	}
 	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
+		if groupHasFinished(cmd.Process.Pid, err) {
 			return nil
 		}
 		return cmd.Process.Kill()
@@ -56,23 +56,30 @@ func (c *controller) finish(cmd *exec.Cmd) error {
 		return nil
 	}
 	pid := cmd.Process.Pid
-	if err := syscall.Kill(-pid, 0); errors.Is(err, syscall.ESRCH) {
+	if err := syscall.Kill(-pid, 0); groupHasFinished(cmd.Process.Pid, err) {
 		return nil
 	}
 	// A normally-exited leader can still leave a descendant holding inherited
 	// pipes or repository locks. Kill the remaining group before returning
 	// ownership of the repository to another operation.
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !groupHasFinished(cmd.Process.Pid, err) {
 		return err
 	}
 	deadline := time.Now().Add(processTreeFinishTimeout)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(-pid, 0); errors.Is(err, syscall.ESRCH) {
+		if err := syscall.Kill(-pid, 0); groupHasFinished(cmd.Process.Pid, err) {
 			return nil
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	return fmt.Errorf("process group %d still active after %s", pid, processTreeFinishTimeout)
+}
+
+// EPERM alone is not evidence of completion: a live group may be owned by
+// someone else. Darwin also returns it for groups containing only zombies.
+func groupHasFinished(pid int, err error) bool {
+	return errors.Is(err, syscall.ESRCH) ||
+		(errors.Is(err, syscall.EPERM) && zombieOnlyGroup(pid))
 }
 
 func (*controller) close() {}

@@ -690,9 +690,10 @@ type Daemon struct {
 	// or any task is in handleTask. Together that closes the fetch-then-claim
 	// race where a new task slipping in during the release-metadata fetch
 	// would be cancelled by triggerRestart's root-ctx cancel.
-	claimMu        sync.Mutex
-	pauseClaims    bool // when true, the batch poller skips claiming
-	claimsInFlight int  // pollers that have decided to claim but haven't yet handed the task off to handleTask
+	claimMu           sync.Mutex
+	updateMaintenance bool // durable coordinated-update gate, independent of transient barriers
+	pauseClaims       bool // when true, the batch poller skips claiming
+	claimsInFlight    int  // pollers that have decided to claim but haven't yet handed the task off to handleTask
 
 	activeEnvRootsMu   sync.Mutex
 	activeEnvRootsCond *sync.Cond      // signalled when an in-flight env-root GC mutation finishes
@@ -827,6 +828,7 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
 	d.executionEnvironmentCommand = defaultExecutionEnvironmentCommand
 	d.runner = taskRunnerFunc(d.runTask)
 	d.runUpdateFn = d.runUpdate
+	d.loadUpdateMaintenance()
 	return d
 }
 
@@ -5060,7 +5062,7 @@ func (d *Daemon) tryBeginServerUpdate(ctx context.Context) serverUpdateAcquireRe
 	}
 
 	d.claimMu.Lock()
-	if d.pauseClaims || d.activeTasks.Load() > 0 {
+	if d.pauseClaims || d.updateMaintenance || d.activeTasks.Load() > 0 {
 		d.claimMu.Unlock()
 		d.updating.Store(false)
 		return serverUpdateRuntimeBusy
@@ -5181,7 +5183,7 @@ func (d *Daemon) reportUpdateResultWithRetry(ctx context.Context, runtimeID, upd
 func (d *Daemon) tryEnterClaim() bool {
 	d.claimMu.Lock()
 	defer d.claimMu.Unlock()
-	if d.pauseClaims {
+	if d.pauseClaims || d.updateMaintenance {
 		return false
 	}
 	d.claimsInFlight++
@@ -5209,7 +5211,7 @@ func (d *Daemon) trySetClaimBarrier() bool {
 	// double-acquires: two holders both believe they own it, and whichever
 	// finishes first releases it out from under the other. tryBeginServerUpdate
 	// makes the same check for the same reason.
-	if d.pauseClaims || d.claimsInFlight > 0 || d.activeTasks.Load() > 0 {
+	if d.pauseClaims || d.updateMaintenance || d.claimsInFlight > 0 || d.activeTasks.Load() > 0 {
 		return false
 	}
 	d.pauseClaims = true

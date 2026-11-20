@@ -238,16 +238,16 @@ func (o *Outbound) releaseDelivery(ctx context.Context, lease *deliveryLease) {
 
 // claimSend publishes a send before it is made, so any other process reads
 // "a send is outstanding" rather than "nothing has been sent".
-func (o *Outbound) claimSend(ctx context.Context, lease *deliveryLease) bool {
+func (o *Outbound) claimSend(ctx context.Context, lease *deliveryLease) (bool, error) {
 	rows, err := o.q.MarkChannelReplyDeliverySending(ctx, db.MarkChannelReplyDeliverySendingParams{
 		TurnID:     lease.turnID,
 		OwnerToken: lease.token,
 	})
 	if err != nil {
 		o.logger.WarnContext(ctx, "telegram outbound: publishing the send failed; not sending", "error", err)
-		return false
+		return false, err
 	}
-	return rows == 1
+	return rows == 1, nil
 }
 
 // classifySend turns a Bot API result into what the turn now knows.
@@ -416,8 +416,9 @@ func uuidText(id pgtype.UUID) string {
 // renewDelivery re-proves the turn is ours and pushes the lease out. Terminal
 // delivery holds a turn across several scheduler rounds, so it asks again
 // before each Telegram call rather than trusting a lease taken minutes ago.
-// False means another process owns the turn now and this one must stop.
-func (o *Outbound) renewDelivery(ctx context.Context, lease *deliveryLease) bool {
+// A successful zero-row write means another process owns the turn. A database
+// error proves no such thing and must be reported separately.
+func (o *Outbound) renewDelivery(ctx context.Context, lease *deliveryLease) (bool, error) {
 	rows, err := o.q.RenewChannelReplyDelivery(ctx, db.RenewChannelReplyDeliveryParams{
 		TurnID:       lease.turnID,
 		OwnerToken:   lease.token,
@@ -425,9 +426,9 @@ func (o *Outbound) renewDelivery(ctx context.Context, lease *deliveryLease) bool
 	})
 	if err != nil {
 		o.logger.WarnContext(ctx, "telegram outbound: renewing the delivery lease failed; not sending", "error", err)
-		return false
+		return false, err
 	}
-	return rows == 1
+	return rows == 1, nil
 }
 
 // inheritedSend reports a send this process did not make and cannot resolve.

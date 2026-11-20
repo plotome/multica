@@ -1,3 +1,4 @@
+import {setupCoordinatedUpdater} from "./coordinated-updater";
 import { autoUpdater, type UpdateDownloadedEvent } from "electron-updater";
 import { app, type BrowserWindow, type MessageBoxOptions, ipcMain } from "electron";
 import type {
@@ -69,6 +70,7 @@ export interface UpdaterDaemonGate {
 }
 
 export interface SetupAutoUpdaterOptions {
+ coordinatedQuit?: (profile:string,lease:string,digest:string)=>Promise<void>;
   daemonGate?: UpdaterDaemonGate;
   platform?: NodeJS.Platform;
 }
@@ -152,6 +154,7 @@ export function setupAutoUpdater(
   getMainWindows: () => readonly BrowserWindow[],
   options: SetupAutoUpdaterOptions = {},
 ): void {
+  if(app.isPackaged && setupCoordinatedUpdater(getMainWindows,options.coordinatedQuit??(async()=>{throw new Error("Coordinated quit gate is unavailable")})))return;
   // Packaged Fork builds are maintained with verified offline bundles. Never
   // consume an upstream feed or a cached pending installer, even on app quit.
   if (app.isPackaged) {

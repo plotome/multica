@@ -1422,6 +1422,7 @@ export function useRealtimeSync(
       }
     };
 
+    const unsubForkUpdate=ws.on("fork-update:changed",()=>{void qc.invalidateQueries({queryKey:["fork-update-state"]})});
     const unsubWsUpdated = ws.on("workspace:updated", (p) => {
       applyWorkspaceUpdatedToCache(qc, p as WorkspaceUpdatedPayload);
     });
@@ -1929,6 +1930,7 @@ export function useRealtimeSync(
       unsubIssueReactionRemoved();
       unsubSubscriberAdded();
       unsubSubscriberRemoved();
+      unsubForkUpdate();
       unsubWsUpdated();
       unsubWsDeleted();
       unsubMemberRemoved();

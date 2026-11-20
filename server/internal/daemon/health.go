@@ -19,8 +19,11 @@ import (
 
 // HealthResponse is returned by the daemon's local health endpoint.
 type HealthResponse struct {
-	Status string `json:"status"`
-	PID    int    `json:"pid"`
+	UpdateMaintenanceSupported bool   `json:"update_maintenance_supported"`
+	UpdatePaused               bool   `json:"update_paused"`
+	IdleShutdownSupported      bool   `json:"idle_shutdown_supported"`
+	Status                     string `json:"status"`
+	PID                        int    `json:"pid"`
 	// OS is the daemon's runtime.GOOS. The desktop app compares it against its
 	// own host OS to detect a daemon it cannot manage — e.g. a Windows desktop
 	// reaching a Linux daemon inside WSL2 over localhost forwarding. The
@@ -344,23 +347,29 @@ func (d *Daemon) healthHandler(startedAt time.Time) http.HandlerFunc {
 			status = "running"
 		}
 
+		d.claimMu.Lock()
+		updatePaused := d.updateMaintenance
+		d.claimMu.Unlock()
 		resp := HealthResponse{
-			Status:                status,
-			PID:                   os.Getpid(),
-			OS:                    runtime.GOOS,
-			Uptime:                time.Since(startedAt).Truncate(time.Second).String(),
-			Profile:               d.cfg.Profile,
-			LaunchedBy:            d.cfg.LaunchedBy,
-			DaemonID:              d.cfg.DaemonID,
-			DeviceName:            d.cfg.DeviceName,
-			ServerURL:             d.cfg.ServerBaseURL,
-			CLIVersion:            d.cfg.CLIVersion,
-			CLICommit:             d.cfg.CLICommit,
-			ActiveTaskCount:       d.activeTasks.Load(),
-			RunningTaskCount:      d.runningTasks.Load(),
-			ResourceWaitTaskCount: d.resourceWaitTasks.Load(),
-			Agents:                agents,
-			SkippedAgents:         d.skippedAgentsSnapshot(),
+			UpdateMaintenanceSupported: filepath.IsAbs(d.cfg.MaintenanceDir),
+			UpdatePaused:               updatePaused,
+			IdleShutdownSupported:      true,
+			Status:                     status,
+			PID:                        os.Getpid(),
+			OS:                         runtime.GOOS,
+			Uptime:                     time.Since(startedAt).Truncate(time.Second).String(),
+			Profile:                    d.cfg.Profile,
+			LaunchedBy:                 d.cfg.LaunchedBy,
+			DaemonID:                   d.cfg.DaemonID,
+			DeviceName:                 d.cfg.DeviceName,
+			ServerURL:                  d.cfg.ServerBaseURL,
+			CLIVersion:                 d.cfg.CLIVersion,
+			CLICommit:                  d.cfg.CLICommit,
+			ActiveTaskCount:            d.activeTasks.Load(),
+			RunningTaskCount:           d.runningTasks.Load(),
+			ResourceWaitTaskCount:      d.resourceWaitTasks.Load(),
+			Agents:                     agents,
+			SkippedAgents:              d.skippedAgentsSnapshot(),
 
 			ReloadPendingReason: d.reloadPending(),
 			Workspaces:          wsList,
@@ -396,6 +405,20 @@ func (d *Daemon) shutdownHandler() http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if r.URL.Query().Get("when_idle") == "1" {
+			if d.cancelFunc == nil {
+				http.Error(w, "shutdown unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if r.URL.Query().Get("expected_pid") != fmt.Sprint(os.Getpid()) {
+				http.Error(w, "daemon identity changed", http.StatusConflict)
+				return
+			}
+			if !d.trySetClaimBarrier() {
+				http.Error(w, "daemon is busy", http.StatusConflict)
+				return
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "shutting down"})
 		if d.cancelFunc != nil {
@@ -412,6 +435,9 @@ func (d *Daemon) serveHealth(ctx context.Context, ln net.Listener, startedAt tim
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", d.healthHandler(startedAt))
 	mux.HandleFunc("/shutdown", d.shutdownHandler())
+	mux.HandleFunc("/updates/prepare", d.updateMaintenanceHandler(false))
+	mux.HandleFunc("/updates/resume", d.updateMaintenanceHandler(true))
+	mux.HandleFunc("/updates/stop", d.updateMaintenanceStopHandler())
 	mux.HandleFunc("/repo/checkout", d.repoCheckoutHandler())
 
 	srv := &http.Server{Handler: mux}

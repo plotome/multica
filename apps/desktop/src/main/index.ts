@@ -16,6 +16,7 @@ import fixPath from "fix-path";
 import { createElectronBusyInstallPrompt, setupAutoUpdater } from "./updater";
 import {
   prepareDaemonForUpdateInstall,
+  prepareCoordinatedDesktopQuit,
   resumeDaemonAfterAbortedUpdateInstall,
   setupDaemonManager,
 } from "./daemon-manager";
@@ -243,14 +244,17 @@ function handOffToWorkspaceWindow(
 ): boolean {
   if (!source || !mainWindows.has(source)) return false;
   if (!request || typeof request !== "object") return false;
-  const { workspaceSlug: rawSlug, path: rawPath, navigate } = request as Record<
-    string,
-    unknown
-  >;
+  const {
+    workspaceSlug: rawSlug,
+    path: rawPath,
+    navigate,
+  } = request as Record<string, unknown>;
   const workspaceSlug = parseWorkspaceSlug(rawSlug);
   if (!workspaceSlug) return false;
   const path =
-    rawPath === undefined ? null : parseWorkspaceWindowPath(workspaceSlug, rawPath);
+    rawPath === undefined
+      ? null
+      : parseWorkspaceWindowPath(workspaceSlug, rawPath);
   if (rawPath !== undefined && !path) return false;
   const target = mainWindows.findByWorkspace(workspaceSlug, source);
   if (!target || target.isDestroyed()) return false;
@@ -703,7 +707,11 @@ const DEV_APP_NAME = process.env.DESKTOP_APP_SUFFIX
   ? `Multica Canary ${process.env.DESKTOP_APP_SUFFIX}`
   : "Multica Canary";
 
-if (is.dev) {
+const packagedIsolationName = !is.dev && /^MulticaIsolated[A-Za-z0-9]+$/.test(app.getName()) ? app.getName() : null;
+if (packagedIsolationName) {
+  app.setName(packagedIsolationName);
+  app.setPath("userData", join(app.getPath("appData"), packagedIsolationName));
+} else if (is.dev) {
   app.setName(DEV_APP_NAME);
   app.setPath("userData", join(app.getPath("appData"), DEV_APP_NAME));
 } else {
@@ -718,7 +726,9 @@ if (is.dev) {
 
 // --- Protocol registration -----------------------------------------------
 
-if (process.defaultApp) {
+if (packagedIsolationName) {
+  // An isolated acceptance package must not claim the production URL protocol.
+} else if (process.defaultApp) {
   // In dev, register with the path to the electron binary + app path
   app.setAsDefaultProtocolClient(PROTOCOL, process.execPath, [
     app.getAppPath(),
@@ -777,6 +787,7 @@ if (!gotTheLock) {
     };
 
     runtimeConfigResult = await loadRuntimeConfig({
+      ...(packagedIsolationName ? {configPath: join(app.getPath("userData"), "desktop.json")} : {}),
       isDev: is.dev,
       // electron-vite exposes VITE_* on import.meta.env for the main process;
       // keep dev URL overrides on the same source the renderer used before
@@ -834,7 +845,9 @@ if (!gotTheLock) {
     ipcMain.handle("file:download-url", (event, url: string) => {
       const sourceWindow = BrowserWindow.fromWebContents(event.sender);
       if (!sourceWindow) {
-        console.warn("[download] ignored file:download-url — source window torn down");
+        console.warn(
+          "[download] ignored file:download-url — source window torn down",
+        );
         return;
       }
       downloadURLSafely(sourceWindow, url);
@@ -846,7 +859,14 @@ if (!gotTheLock) {
     // already carries X-Client-Version and X-Client-OS.
     ipcMain.on("app:get-info", (event) => {
       const p = process.platform;
-      const os = p === "darwin" ? "macos" : p === "win32" ? "windows" : p === "linux" ? "linux" : "unknown";
+      const os =
+        p === "darwin"
+          ? "macos"
+          : p === "win32"
+            ? "windows"
+            : p === "linux"
+              ? "linux"
+              : "unknown";
       event.returnValue = { version: getAppVersion(), os };
     });
 
@@ -884,16 +904,13 @@ if (!gotTheLock) {
     // Preload announces each listener only after it has been installed by a
     // main renderer. Ignore issue-window senders so they can never drain a
     // payload intended for a tabbed application window.
-    ipcMain.on(
-      MAIN_RENDERER_CHANNEL_STATE_CHANNEL,
-      (event, state: unknown) => {
-        const window = BrowserWindow.fromWebContents(event.sender);
-        if (!window || !mainWindows.has(window)) return;
-        const parsed = parseMainRendererChannelState(state);
-        if (!parsed) return;
-        mainRendererMessages.setReady(window, parsed.channel, parsed.ready);
-      },
-    );
+    ipcMain.on(MAIN_RENDERER_CHANNEL_STATE_CHANNEL, (event, state: unknown) => {
+      const window = BrowserWindow.fromWebContents(event.sender);
+      if (!window || !mainWindows.has(window)) return;
+      const parsed = parseMainRendererChannelState(state);
+      if (!parsed) return;
+      mainRendererMessages.setReady(window, parsed.channel, parsed.ready);
+    });
 
     // Each main window reports the workspace it shows, so routing by
     // workspace and the restored session follow in-window switches.
@@ -1057,6 +1074,7 @@ if (!gotTheLock) {
 
     // Register first so the update quit gate can block daemon autoStop.
     setupAutoUpdater(() => mainWindows.all(), {
+      coordinatedQuit: prepareCoordinatedDesktopQuit,
       // Windows only (the updater ignores it elsewhere): stop the bundled
       // daemon before the installer runs so multica.exe is replaced. #8823
       daemonGate: {

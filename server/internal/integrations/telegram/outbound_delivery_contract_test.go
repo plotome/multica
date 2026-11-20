@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -459,5 +460,67 @@ func TestAuditControlSeparateTurnsWithIdenticalText(t *testing.T) {
 	defer bot.mu.Unlock()
 	if len(bot.messages) != 2 {
 		t.Fatalf("distinct turns produced %d replies, want 2", len(bot.messages))
+	}
+}
+
+// A database timeout is not proof that another owner took the turn. In
+// particular, the server may have committed the claim before losing its reply.
+type auditOwnershipFailure struct {
+	*auditLedgerQueries
+	operation string
+	commit    bool
+}
+
+func (q *auditOwnershipFailure) MarkChannelReplyDeliverySending(ctx context.Context, p db.MarkChannelReplyDeliverySendingParams) (int64, error) {
+	if q.operation != "send" {
+		return q.auditLedgerQueries.MarkChannelReplyDeliverySending(ctx, p)
+	}
+	if q.commit {
+		if _, err := q.auditLedgerQueries.MarkChannelReplyDeliverySending(ctx, p); err != nil {
+			return 0, err
+		}
+	}
+	return 0, context.DeadlineExceeded
+}
+func (q *auditOwnershipFailure) RenewChannelReplyDelivery(ctx context.Context, p db.RenewChannelReplyDeliveryParams) (int64, error) {
+	if q.operation != "renew" {
+		return q.auditLedgerQueries.RenewChannelReplyDelivery(ctx, p)
+	}
+	return 0, context.DeadlineExceeded
+}
+func TestAuditOwnershipWriteFailureIsReported(t *testing.T) {
+	for _, tc := range []struct {
+		operation string
+		commit    bool
+	}{{"send", false}, {"send", true}, {"renew", false}} {
+		t.Run(fmt.Sprintf("%s/committed=%t", tc.operation, tc.commit), func(t *testing.T) {
+			bot := &auditBot{}
+			o, base, _, _ := auditSetup(t, bot)
+			q := &auditOwnershipFailure{auditLedgerQueries: &auditLedgerQueries{fakeTelegramOutboundQueries: base, row: db.ChatMessage{ID: telegramTestUUID(9)}}, commit: tc.commit}
+			o.q = q
+			e := telegramTestEvent()
+			o.enqueueTerminalReply(e)
+			reply := o.terminalSessions[e.ChatSessionID].queue[0]
+			result := o.sendNextTerminalRequest(context.Background(), reply)
+			if result.done || !reply.initialized {
+				t.Fatalf("initialize: %+v", result)
+			}
+			q.operation = tc.operation
+			result = o.sendNextTerminalRequest(context.Background(), reply)
+			if !result.done || !errors.Is(result.err, context.DeadlineExceeded) {
+				t.Fatalf("ownership write failure silently discarded: %+v", result)
+			}
+			if len(bot.messages) != 0 {
+				t.Fatal("provider called after ownership write failed")
+			}
+			// A commit-then-timeout must retain the durable in-flight fence. No retry
+			// or cleanup is permitted to turn an ambiguous database reply into a send.
+			if tc.commit {
+				rows, err := q.auditLedgerQueries.MarkChannelReplyDeliverySending(context.Background(), db.MarkChannelReplyDeliverySendingParams{TurnID: reply.lease.turnID, OwnerToken: reply.lease.token})
+				if err != nil || rows != 0 {
+					t.Fatalf("in-flight fence lost: rows=%d err=%v", rows, err)
+				}
+			}
+		})
 	}
 }

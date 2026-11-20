@@ -1,5 +1,12 @@
 import { taskElicitationListSchema, type TaskElicitation, type ElicitationChoice } from "../agents/elicitation-schema";
 import type { ZodType } from "zod";
+import {
+  ForkUpdateStateSchema,
+  ForkUpdateResponseSchema,
+  type ForkUpdateState,
+  type ForkUpdateResponse,
+  type ForkUpdateAction,
+} from "./fork-update-schema";
 import { AgentRuntimeSchema, EMPTY_RUNTIME } from "../runtimes/schema";
 import type { IssueWakeup, IssueWakeupInput, IssueWakeupSummaryRow, PausedWakeup, SystemWakeup, WakeupRun, WorkspaceSystemWakeup } from "../types/issue-wakeup";
 import type { WorkspaceWakeupPage, WorkspaceWakeupFilters } from "../types/issue-wakeup";
@@ -2783,6 +2790,27 @@ export class ApiClient {
     return this.fetch(`/api/runtimes/${runtimeId}/update`, {
       method: "POST",
       body: JSON.stringify({ target_version: targetVersion }),
+    });
+  }
+
+  async getForkUpdateState(refreshCatalog=true): Promise<ForkUpdateResponse | null> {
+    const raw = await this.fetch<unknown>(refreshCatalog?"/api/fork-updates":"/api/fork-updates?catalog_refresh=0");
+    return parseWithFallback<ForkUpdateResponse | null>(raw, ForkUpdateResponseSchema, null, {
+      endpoint: "GET /api/fork-updates",
+    });
+  }
+
+  async actOnForkUpdate(
+    state: ForkUpdateState,
+    action: ForkUpdateAction,
+    target?: string,
+  ): Promise<ForkUpdateState | null> {
+    const raw = await this.fetch<unknown>("/api/fork-updates/action", {
+      method: "POST",
+      body: JSON.stringify({ action, target, digest: state.receipt.digest, revision: state.revision }),
+    });
+    return parseWithFallback<ForkUpdateState | null>(raw, ForkUpdateStateSchema, null, {
+      endpoint: "POST /api/fork-updates/action",
     });
   }
 

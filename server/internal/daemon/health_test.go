@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -387,6 +388,56 @@ func TestShutdownHandlerRejectsNonPost(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	if cancelled {
 		t.Fatal("GET request should not trigger cancellation")
+	}
+}
+
+func TestIdleShutdownAtomicallyExcludesTaskAndClaim(t *testing.T) {
+	for _, busy := range []string{"task", "claim", "barrier", "idle"} {
+		t.Run(busy, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			d := &Daemon{cancelFunc: cancel}
+			if busy == "task" {
+				d.activeTasks.Store(1)
+			}
+			if busy == "claim" {
+				d.claimsInFlight = 1
+			}
+			if busy == "barrier" {
+				d.pauseClaims = true
+			}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/shutdown?when_idle=1&expected_pid=%d", os.Getpid()), nil)
+			d.shutdownHandler().ServeHTTP(rec, req)
+			if busy != "idle" {
+				if rec.Code != http.StatusConflict {
+					t.Fatalf("busy shutdown returned %d", rec.Code)
+				}
+				select {
+				case <-ctx.Done():
+					t.Fatal("busy daemon was stopped")
+				default:
+				}
+				return
+			}
+			if rec.Code != http.StatusOK || !d.pauseClaims {
+				t.Fatal("idle shutdown did not hold claim barrier")
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Second):
+				t.Fatal("idle shutdown never cancelled")
+			}
+		})
+	}
+}
+
+func TestIdleShutdownRejectsChangedProcessIdentity(t *testing.T) {
+	d := &Daemon{cancelFunc: func() { t.Error("wrong daemon was stopped") }}
+	rec := httptest.NewRecorder()
+	d.shutdownHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/shutdown?when_idle=1&expected_pid=-1", nil))
+	if rec.Code != http.StatusConflict || d.pauseClaims {
+		t.Fatal("changed identity was accepted")
 	}
 }
 

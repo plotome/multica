@@ -162,7 +162,7 @@ try {
 }
 await writeFile(join(destDir, "..", "desktop-release.json"), JSON.stringify({
   commit: git("rev-parse", "HEAD"), platform: targetPlatform, arch: targetArch,
-  update_mode: "manual", source_clean: sourceClean,
+  update_mode: "coordinated", source_clean: sourceClean,
 }, null, 2) + "\n");
 
 console.log(`[bundle-cli] bundled ${srcBinary} → ${destBinary}`);

@@ -1,19 +1,19 @@
 -- The database fence deliberately also covers an older backend's SQL. A
 -- backend rollback must not turn a durable maintenance receipt into a bypass.
 CREATE TABLE device_maintenance (
-    daemon_id text PRIMARY KEY,
+    daemon_id text NOT NULL,
     lease uuid NOT NULL,
     digest text NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
     generation uuid NOT NULL,
-    device_owner uuid NOT NULL REFERENCES "user"(id),
-    actor_id uuid NOT NULL REFERENCES "user"(id),
+    device_owner uuid NOT NULL,
+    actor_id uuid NOT NULL,
     workspace_ids uuid[] NOT NULL,
     admitted_tasks uuid[] NOT NULL,
     server_drained boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE TABLE device_maintenance_event (
-    id bigserial PRIMARY KEY,
+    id bigserial NOT NULL,
     daemon_id text NOT NULL,
     action text NOT NULL,
     body jsonb NOT NULL,

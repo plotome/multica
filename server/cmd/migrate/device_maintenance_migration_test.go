@@ -2,19 +2,25 @@ package main
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/multica-ai/multica/server/internal/testutil"
 )
 
 func TestDeviceMaintenanceFreshDDLAndRollbackGuard(t *testing.T) {
-	pool := openTestPool(t)
+	pool := testutil.IsolatedDB(t, os.Getenv("DATABASE_URL"))
 	ctx := context.Background()
-	var database string
-	if e := pool.QueryRow(ctx, `SELECT current_database()`).Scan(&database); e != nil || !strings.HasPrefix(database, "multica_multica_") {
-		t.Fatal("isolated worktree database required")
-	}
 	schema := createScratchSchema(t, ctx, pool, "device_maintenance_ddl_")
-	scoped := openTestPoolWithSearchPath(t, schema)
+	config := pool.Config()
+	config.ConnConfig.RuntimeParams["search_path"] = schema
+	scoped, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(scoped.Close)
 	for _, sql := range []string{
 		`CREATE TABLE agent_runtime(id uuid,daemon_id text,workspace_id uuid,owner_id uuid)`,
 		`CREATE TABLE member(workspace_id uuid,user_id uuid,role text)`,

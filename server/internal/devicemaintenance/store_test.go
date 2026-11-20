@@ -20,22 +20,8 @@ import (
 func fixture(t *testing.T) (*pgxpool.Pool, *testutil.Fixture, string, string) {
 	t.Helper()
 	ctx := context.Background()
-	cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(cfg.ConnConfig.Database, "multica_multica_") {
-		t.Fatal("existing isolated worktree database required")
-	}
-	cfg.MaxConns = 4
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = pool.Ping(ctx); err != nil {
-		t.Fatal("isolated database unavailable")
-	}
-	t.Cleanup(pool.Close)
+	// A fresh database, not a source-DSN name, proves isolation on both CI and worktrees.
+	pool := testutil.IsolatedDB(t, os.Getenv("DATABASE_URL"))
 	boot := testutil.New(pool, "", "")
 	id := uuid.NewString()
 	owner := boot.User(t, "device maintenance", id+"@example.invalid")

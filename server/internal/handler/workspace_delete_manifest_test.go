@@ -57,6 +57,9 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"client_usage_daily":                 workspaceDeleteDetach,
 	"comment":                            workspaceDelete,
 	"comment_reaction":                   workspaceDelete,
+	"device_maintenance":                 workspaceDeleteKeep, // Device-wide lease; deleting one workspace must not release other scopes.
+	"device_maintenance_event":           workspaceDeleteKeep, // Device audit survives workspace teardown.
+	"fork_update_rollout":                workspaceDelete,     // Approval and results belong to this workspace.
 	"contact_sales_inquiry":              workspaceDeleteKeep,
 	"daemon_connection":                  workspaceDelete,
 	"daemon_token":                       workspaceDelete,

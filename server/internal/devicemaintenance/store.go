@@ -69,7 +69,9 @@ func (s Store) Act(ctx context.Context, device, actor, action string, req Reques
 	// Assert the actual database fence, not just a backend version string.
 	var version, guards int
 	err = tx.QueryRow(ctx, `SELECT device_maintenance_version(),
-        (SELECT count(*) FROM pg_trigger WHERE tgname IN ('device_maintenance_task','device_maintenance_runtime')
+        (SELECT count(*) FROM pg_trigger WHERE
+          ((tgrelid='agent_task_queue'::regclass AND tgname='device_maintenance_task')
+           OR (tgrelid='agent_runtime'::regclass AND tgname='device_maintenance_runtime'))
           AND tgenabled IN ('O','A') AND NOT tgisinternal)`).Scan(&version, &guards)
 	if err != nil || version != 1 || guards != 2 {
 		return out, refusal(503, "device maintenance database fence unavailable")

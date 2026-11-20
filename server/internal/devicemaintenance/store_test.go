@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/testutil"
 )
@@ -20,8 +21,24 @@ import (
 func fixture(t *testing.T) (*pgxpool.Pool, *testutil.Fixture, string, string) {
 	t.Helper()
 	ctx := context.Background()
-	// A fresh database, not a source-DSN name, proves isolation on both CI and worktrees.
-	pool := testutil.IsolatedDB(t, os.Getenv("DATABASE_URL"))
+	cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// CI and worktrees provision a disposable database on a loopback test server.
+	if !strings.HasPrefix(cfg.ConnConfig.Database, "multica_multica_") ||
+		(cfg.ConnConfig.Host != "localhost" && cfg.ConnConfig.Host != "127.0.0.1" && cfg.ConnConfig.Host != "::1") {
+		t.Fatal("existing isolated CI/worktree database on loopback required")
+	}
+	cfg.MaxConns = 4
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.Ping(ctx); err != nil {
+		t.Fatal("isolated database unavailable")
+	}
+	t.Cleanup(pool.Close)
 	boot := testutil.New(pool, "", "")
 	id := uuid.NewString()
 	owner := boot.User(t, "device maintenance", id+"@example.invalid")
@@ -292,6 +309,31 @@ func TestDeviceMaintenanceFailedDeploymentDoesNotClaimCapability(t *testing.T) {
 	tx.Rollback(ctx)
 	if !must(t, Store{pool}, device, fx.UserID, "status", Request{}).Frozen {
 		t.Fatal("failed deployment released freeze")
+	}
+	state = must(t, Store{pool}, device, fx.UserID, "drain", binding(state))
+	must(t, Store{pool}, device, fx.UserID, "release", binding(state))
+}
+
+func TestDeviceMaintenanceIgnoresOtherSchemaTriggerNames(t *testing.T) {
+	pool, fx, device, _ := fixture(t)
+	ctx := context.Background()
+	state := must(t, Store{pool}, device, fx.UserID, "acquire", request())
+	schema := pgx.Identifier{"maintenance_scope_" + strings.ReplaceAll(uuid.NewString(), "-", "")}.Sanitize()
+	if _, err := pool.Exec(ctx, `CREATE SCHEMA `+schema); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DROP SCHEMA `+schema+` CASCADE`) })
+	if _, err := pool.Exec(ctx, `
+CREATE TABLE `+schema+`.agent_runtime(id integer);
+CREATE TABLE `+schema+`.agent_task_queue(id integer);
+CREATE FUNCTION `+schema+`.guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+CREATE TRIGGER device_maintenance_runtime AFTER INSERT ON `+schema+`.agent_runtime FOR EACH ROW EXECUTE FUNCTION `+schema+`.guard();
+CREATE TRIGGER device_maintenance_task BEFORE INSERT ON `+schema+`.agent_task_queue FOR EACH ROW EXECUTE FUNCTION `+schema+`.guard();`); err != nil {
+		t.Fatal(err)
+	}
+	observed := must(t, Store{pool}, device, fx.UserID, "status", Request{})
+	if !observed.Frozen || observed.Lease != state.Lease || observed.Generation != state.Generation {
+		t.Fatal("unrelated schema changed the active fence", observed, state)
 	}
 	state = must(t, Store{pool}, device, fx.UserID, "drain", binding(state))
 	must(t, Store{pool}, device, fx.UserID, "release", binding(state))

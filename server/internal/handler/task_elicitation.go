@@ -178,6 +178,18 @@ func (h *Handler) requireElicitationActor(w http.ResponseWriter, r *http.Request
 			actor = receipt.OwnerID
 		}
 	}
+	// Apply the same workspace, chat-owner and private-project boundary as
+	// other human task reads before revealing the device-owner decision.
+	// A validated card service acts for its bound human owner, never for
+	// the service account's broader workspace membership.
+	visibilityRequest := r
+	if actor != requestUserID(r) {
+		visibilityRequest = r.Clone(r.Context())
+		visibilityRequest.Header.Set("X-User-ID", actor)
+	}
+	if _, ok := h.loadTaskForUser(w, visibilityRequest); !ok {
+		return task, pgtype.UUID{}, false
+	}
 	if actor == "" || uuidToString(rt.OwnerID) != actor {
 		writeError(w, 403, "only the device owner can review application approvals")
 		return task, pgtype.UUID{}, false

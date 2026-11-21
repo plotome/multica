@@ -37,6 +37,7 @@ type privateRouteResolver func(f *privateRouteFixture, caller string) string
 // caller's own, like a notification. Every route declaring one of these is
 // probed by TestEveryRouteByProjectObjectIDHidesPrivateProjects.
 var projectScopedRouteParams = map[string]privateRouteResolver{
+	"elicitations/{requestId}":         func(f *privateRouteFixture, _ string) string { return f.taskElicitation() },
 	"projects/{id}":                    func(f *privateRouteFixture, _ string) string { return f.projectID },
 	"resources/{resourceId}":           func(f *privateRouteFixture, _ string) string { return f.projectResource() },
 	"issue-views/{id}":                 func(f *privateRouteFixture, _ string) string { return f.projectView() },
@@ -71,6 +72,8 @@ type outsideProjectParam struct {
 // it cannot name a private project's object. A route declaring only these is
 // not probed.
 var routeParamsOutsideProjects = map[string]outsideProjectParam{
+	"device-maintenance/{action}":    {why: "a device maintenance action verb, not a project object"},
+	"device-maintenance/{daemonId}":  {why: "a device owner maintenance operation across workspaces, not a project object"},
 	"workspaces/{id}":                {why: "the workspace itself"},
 	"members/{memberId}":             {why: "a workspace membership"},
 	"invitations/{id}":               {why: "the caller's own workspace invitation"},
@@ -214,6 +217,16 @@ func (f *privateRouteFixture) issueRun() string {
 		return f.fx.Task(f.t, f.shared.agentID, dbfx.Cols{
 			"issue_id": f.issue(), "runtime_id": f.shared.runtimeID, "status": "failed",
 			"originator_user_id": f.shared.insiderID, "accountable_user_id": f.shared.insiderID,
+		})
+	})
+}
+
+func (f *privateRouteFixture) taskElicitation() string {
+	return f.once("taskElicitation", func() string {
+		return f.fx.Insert(f.t, "task_elicitation", dbfx.Cols{
+			"id":      uuid.NewString(),
+			"task_id": f.issueRun(), "workspace_id": f.fx.WorkspaceID,
+			"request": "{}", "status": "pending",
 		})
 	})
 }

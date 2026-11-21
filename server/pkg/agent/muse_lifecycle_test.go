@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -45,7 +46,23 @@ func rewriteFakeMuseServe(t *testing.T, path, old, replacement string) {
 	if !strings.Contains(string(script), old) {
 		t.Fatalf("fake server does not contain %q", old)
 	}
-	writeTestExecutable(t, path, []byte(strings.Replace(string(script), old, replacement, 1)))
+	// Keep the original inode untouched: another process may still hold a
+	// writable descriptor to it. The shared writer retains the fork lock.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".muse-rewrite-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+	if err := tmp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writeTestExecutable(t, tmp.Name(), []byte(strings.Replace(string(script), old, replacement, 1)))
+	if err := os.Chmod(tmp.Name(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestMuseHostExitAfterTurnStart(t *testing.T) {

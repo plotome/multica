@@ -142,7 +142,7 @@ export function setupAutoUpdater(
       if (enabled !== false) throw new Error(message);
       return preferences;
     });
-    ipcMain.handle("updater:check", (): ManualUpdateCheckResult => ({ ok: false, error: message }));
+    ipcMain.handle("updater:check", (): ManualUpdateCheckResult => ({ ok: false, error: message, reason: "unavailable" }));
     for (const channel of ["updater:download", "updater:install"]) {
       ipcMain.handle(channel, () => { throw new Error(message); });
     }

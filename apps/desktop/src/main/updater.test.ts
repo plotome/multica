@@ -214,7 +214,7 @@ describe("setupAutoUpdater", () => {
     expect(autoUpdater.autoDownload).toBe(false);
     expect(autoUpdater.autoInstallOnAppQuit).toBe(false);
     expect(await invokeIpc("updater:get-preferences")).toEqual({ automaticUpdates: false, mode: "manual" });
-    expect(await invokeIpc("updater:check")).toMatchObject({ ok: false });
+    expect(await invokeIpc("updater:check")).toMatchObject({ ok: false, reason: "unavailable" });
     for (const channel of ["updater:download", "updater:install"]) {
       expect(() => ctx.ipcHandlers.get(channel)!()).toThrow("manual updates");
     }

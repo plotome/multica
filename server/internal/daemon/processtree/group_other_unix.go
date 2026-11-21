@@ -2,4 +2,4 @@
 
 package processtree
 
-func zombieOnlyGroup(int) bool { return false }
+func groupHasNoLiveMembers(int) bool { return false }

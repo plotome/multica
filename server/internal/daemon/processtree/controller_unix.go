@@ -81,10 +81,20 @@ func (c *controller) finish(cmd *exec.Cmd) error {
 }
 
 // EPERM alone is not evidence of completion: a live group may be owned by
-// someone else. Darwin also returns it for groups containing only zombies.
+// someone else. Darwin also returns it for groups with no live members.
 func groupHasFinished(pid int, err error) bool {
-	return errors.Is(err, syscall.ESRCH) ||
-		(errors.Is(err, syscall.EPERM) && zombieOnlyGroup(pid))
+	if errors.Is(err, syscall.ESRCH) {
+		return true
+	}
+	if !errors.Is(err, syscall.EPERM) {
+		return false
+	}
+	if groupHasNoLiveMembers(pid) {
+		return true
+	}
+	// The group can disappear between the failed signal and the process
+	// snapshot. Only a fresh ESRCH proves that transition; EPERM stays live.
+	return errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH)
 }
 
 func (*controller) close() {}

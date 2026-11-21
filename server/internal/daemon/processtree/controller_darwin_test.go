@@ -60,3 +60,22 @@ func TestLiveGroupPermissionErrorIsNotCompletion(t *testing.T) {
 		t.Fatal("successful probe must not imply completion")
 	}
 }
+
+func TestFinishedGroupRecognizesStalePermissionError(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	if _, err := newController(cmd); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("reaped group probe = %v, want ESRCH", err)
+	}
+	if !groupHasNoLiveMembers(cmd.Process.Pid) {
+		t.Fatal("an empty Darwin process snapshot must count as having no live members")
+	}
+	if !groupHasFinished(cmd.Process.Pid, syscall.EPERM) {
+		t.Fatal("a group gone after an earlier EPERM must be recognized as finished")
+	}
+}

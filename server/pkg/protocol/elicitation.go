@@ -38,7 +38,9 @@ func ParseMCPElicitation(raw json.RawMessage) (MCPElicitation, error) {
 	}
 	switch p.Meta.Connector {
 	case "computer-use":
-		if strings.TrimSpace(p.Meta.ToolParams.App) == "" || p.Meta.Origin != "" || p.Meta.ToolName != "" {
+		// Native CUA includes tool_name as provenance (for example get_app_state).
+		// The approval subject remains the exact app; browser origins are separate.
+		if strings.TrimSpace(p.Meta.ToolParams.App) == "" || p.Meta.Origin != "" {
 			return p, fmt.Errorf("unsupported native application approval")
 		}
 		if isApplicationApprovalSurface(p.Meta.ToolParams.App) {

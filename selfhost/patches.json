@@ -67,7 +67,11 @@
         "TestTaskElicitationConcurrentConsumptionIsSingleUse",
         "TestTaskElicitationCardServiceRequiresOwnerReceiptAndRejectsTaskToken",
         "TestCodexElicitationCancelsThenDeliversStructuredResultToExactTurn",
-        "TestEveryRouteByProjectObjectIDHidesPrivateProjects"
+        "TestEveryRouteByProjectObjectIDHidesPrivateProjects",
+        "TestNativeElicitationWithRuntimeToolMetadata",
+        "TestCodexElicitationFailureReachesExactTurn",
+        "TestCodexNativeElicitationExplicitChoices",
+        "TestCodexNativeElicitationDeferredStates"
       ]
     },
     {

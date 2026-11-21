@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-const handlerApproval = `{"threadId":"thread","turnId":"turn","serverName":"cua_repl","mode":"form","message":"Allow Fixture?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","connector_id":"computer-use","tool_params":{"app":"fixture.app"},"persist":["session"]}}`
+const handlerApproval = `{"threadId":"thread","turnId":"turn","serverName":"cua_repl","mode":"form","message":"Allow Fixture?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","connector_id":"computer-use","tool_name":"get_app_state","riskLevel":"high","subtitle":"Review application access","tool_params":{"app":"fixture.app"},"persist":["session"]}}`
 const handlerOriginApproval = `{"threadId":"thread","turnId":"turn","serverName":"cua_repl","mode":"form","message":"Allow site?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","connector_id":"browser-use","tool_name":"access_browser_origin","origin":"https://multica.ploto.cc"}}`
 
 func TestBrowserOriginGrantRequiresOwnerAndExactSubject(t *testing.T) {
@@ -86,6 +86,7 @@ func TestTaskElicitationOwnerOnlyReplayAndScope(t *testing.T) {
 	testutil.Call(t, testHandler.RespondTaskElicitation, approvalHumanRequest(f.taskID, id, "once")).Want(409)
 	var response taskElicitationResponse
 	testutil.Call(t, testHandler.GetTaskElicitation, withURLParams(newOwnerDaemonRequest("GET", "/", nil), "taskId", f.taskID, "requestId", id)).Want(200).JSON(&response)
+	assertJSONEqual(t, response.Request, handlerApproval)
 	assertJSONEqual(t, response.Response, `{"action":"accept","content":{},"_meta":{"persist":"session"}}`)
 	other := newSupplementFixture(t, "claude", "running", false)
 	testutil.Call(t, testHandler.GetTaskElicitation, withURLParams(newOwnerDaemonRequest("GET", "/", nil), "taskId", other.taskID, "requestId", id)).Want(410)

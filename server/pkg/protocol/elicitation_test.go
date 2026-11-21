@@ -76,6 +76,30 @@ func TestElicitationChoices(t *testing.T) {
 	}
 }
 
+// The installed native CUA policy includes the calling tool and risk metadata.
+// An app approval is still bound to tool_params.app, not to the tool's name.
+func TestNativeElicitationWithRuntimeToolMetadata(t *testing.T) {
+	raw := strings.Replace(nativeApproval, `"connector_id":"computer-use"`, `"connector_id":"computer-use","tool_name":"get_app_state","riskLevel":"high","subtitle":"Review this application's access","tool_params_display":[{"name":"app","display_name":"App","value":"Fixture"}]`, 1)
+	p, err := ParseMCPElicitation(json.RawMessage(raw))
+	if err != nil || p.Meta.ToolName != "get_app_state" || p.SubjectKey() != "app:fixture" {
+		t.Fatalf("native runtime metadata rejected: %+v, %v", p, err)
+	}
+	for _, choice := range []string{"once", "session", "always", "decline", "cancel"} {
+		if _, err := ElicitationResponse(json.RawMessage(raw), choice); err != nil {
+			t.Fatalf("%s: %v", choice, err)
+		}
+	}
+	for _, bad := range []string{
+		strings.Replace(raw, `"app":"fixture"`, `"app":""`, 1),
+		strings.Replace(raw, `"app":"fixture"`, `"app":"ai.multica.desktop"`, 1),
+		strings.Replace(raw, `"tool_name":"get_app_state"`, `"tool_name":"get_app_state","origin":"https://example.com"`, 1),
+	} {
+		if _, err := ParseMCPElicitation(json.RawMessage(bad)); err == nil {
+			t.Fatal("unsafe native request accepted:", bad)
+		}
+	}
+}
+
 func TestElicitationCannotControlApprovalSurfaces(t *testing.T) {
 	for _, app := range []string{"ai.multica.desktop", "com.google.Chrome", "com.apple.Safari", "org.mozilla.firefox", "com.microsoft.edgemac", "md.obsidian", "com.apple.Terminal", "com.anthropic.claudefordesktop"} {
 		raw := json.RawMessage(strings.Replace(nativeApproval, `"app":"fixture"`, `"app":"`+app+`"`, 1))

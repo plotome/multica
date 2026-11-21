@@ -66,11 +66,16 @@ func (c *controller) finish(cmd *exec.Cmd) error {
 		return err
 	}
 	deadline := time.Now().Add(processTreeFinishTimeout)
+	var lastErr error
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(-pid, 0); groupHasFinished(cmd.Process.Pid, err) {
+		lastErr = syscall.Kill(-pid, 0)
+		if groupHasFinished(cmd.Process.Pid, lastErr) {
 			return nil
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	if lastErr != nil {
+		return fmt.Errorf("process group %d still active after %s: %w", pid, processTreeFinishTimeout, lastErr)
 	}
 	return fmt.Errorf("process group %d still active after %s", pid, processTreeFinishTimeout)
 }

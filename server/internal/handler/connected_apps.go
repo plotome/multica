@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/connectedapps"
+	"github.com/multica-ai/multica/server/internal/entitlement"
 	"github.com/multica-ai/multica/server/internal/integrations/composio"
 	"github.com/multica-ai/multica/server/internal/logger"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -27,12 +28,13 @@ import (
 
 // AppConnectionResponse is one team or personal account.
 type AppConnectionResponse struct {
-	ID          string  `json:"id"`
-	ToolkitSlug string  `json:"toolkit_slug"`
-	Status      string  `json:"status"`
-	ConnectedBy *string `json:"connected_by,omitempty"`
-	ConnectedAt string  `json:"connected_at"`
-	LastUsedAt  *string `json:"last_used_at"`
+	ID             string  `json:"id"`
+	ToolkitSlug    string  `json:"toolkit_slug"`
+	Status         string  `json:"status"`
+	ConnectedBy    *string `json:"connected_by,omitempty"`
+	ConnectedAt    string  `json:"connected_at"`
+	LastUsedAt     *string `json:"last_used_at"`
+	ActionsBlocked bool    `json:"actions_blocked"`
 }
 
 // AgentAppResponse is one app attached to an agent.
@@ -225,6 +227,26 @@ func (h *Handler) GetAppsOverview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list agent apps")
 		return
 	}
+	slugs := make([]string, 0, len(team)+len(personal))
+	for _, row := range team {
+		slugs = append(slugs, row.ToolkitSlug)
+	}
+	for _, row := range personal {
+		slugs = append(slugs, row.ToolkitSlug)
+	}
+	rules, err := h.Queries.ListAppActionRulesForRun(ctx, db.ListAppActionRulesForRunParams{
+		WorkspaceID: workspaceID, ToolkitSlugs: slugs, OwnerUserID: member.UserID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load account access")
+		return
+	}
+	blocked := map[string]bool{}
+	for _, rule := range rules {
+		if rule.Policy == connectedapps.PolicyBlock {
+			blocked[uuidToString(rule.OwnerUserID)+":"+rule.ToolkitSlug] = true
+		}
+	}
 	catalog := h.ConnectedApps.Catalog(ctx, workspaceID)
 	resp := AppsOverviewResponse{
 		CatalogMode:     catalog.Mode,
@@ -235,10 +257,14 @@ func (h *Handler) GetAppsOverview(w http.ResponseWriter, r *http.Request) {
 		AgentApps:       make([]AgentAppResponse, 0, len(agentApps)),
 	}
 	for _, row := range team {
-		resp.Team = append(resp.Team, connectionFromTeam(row))
+		connection := connectionFromTeam(row)
+		connection.ActionsBlocked = blocked[uuidToString(pgtype.UUID{})+":"+row.ToolkitSlug]
+		resp.Team = append(resp.Team, connection)
 	}
 	for _, row := range personal {
-		resp.Personal = append(resp.Personal, connectionFromPersonal(row))
+		connection := connectionFromPersonal(row)
+		connection.ActionsBlocked = blocked[uuidToString(member.UserID)+":"+row.ToolkitSlug]
+		resp.Personal = append(resp.Personal, connection)
 	}
 	for _, row := range agentApps {
 		resp.AgentApps = append(resp.AgentApps, agentAppResponse(row))
@@ -334,6 +360,23 @@ func (h *Handler) ConnectTeamApp(w http.ResponseWriter, r *http.Request) {
 	req, ok := h.decodeAppSlug(w, r, workspaceID)
 	if !ok {
 		return
+	}
+	// Reauthorizing the app's existing team account is always allowed. A new
+	// one is an addition; an observed one is recorded by the callback once
+	// the account is written (TeamAppConnectGate), so only rejections are
+	// recorded here.
+	if feature := h.paidFeature(r.Context(), workspaceID, entitlement.FeatureTeamAppAccounts); feature.active {
+		reconnect, err := h.teamAppHasAccount(r.Context(), workspaceID, req.ToolkitSlug)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list team accounts")
+			return
+		}
+		if !reconnect {
+			if _, ok := feature.addition(r.Context(), teamAppOpConnect); !ok {
+				writeFeatureLocked(w, entitlement.FeatureTeamAppAccounts)
+				return
+			}
+		}
 	}
 	url, err := h.Composio.BeginTeamConnect(r.Context(), workspaceID, member.UserID, req.ToolkitSlug, req.ReturnTo)
 	if err != nil {
@@ -582,10 +625,7 @@ func (h *Handler) UpdateAppRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Rules []struct {
-			ActionClass string `json:"action_class"`
-			Policy      string `json:"policy"`
-		} `json:"rules"`
+		Rules []appRuleInput `json:"rules"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -597,8 +637,36 @@ func (h *Handler) UpdateAppRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Custom team rules are part of team_app_accounts; personal rules are not.
+	var admission featureAdmission
+	if scope == connectedapps.ScopeTeam {
+		if feature := h.paidFeature(r.Context(), workspaceID, entitlement.FeatureTeamAppAccounts); feature.active {
+			rows, err := h.Queries.ListAppActionRules(r.Context(), db.ListAppActionRulesParams{WorkspaceID: workspaceID, ToolkitSlug: slug, OwnerUserID: owner})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to list rules")
+				return
+			}
+			current := make(map[string]string, len(rows))
+			for _, row := range rows {
+				current[row.ActionClass] = row.Policy
+			}
+			if teamRulesAdd(slug, current, req.Rules) {
+				if admission, ok = feature.addition(r.Context(), teamAppOpChangeRules); !ok {
+					writeFeatureLocked(w, entitlement.FeatureTeamAppAccounts)
+					return
+				}
+			}
+		}
+	}
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save rules")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
 	for _, rule := range req.Rules {
-		if _, err := h.Queries.UpsertAppActionRule(r.Context(), db.UpsertAppActionRuleParams{
+		if _, err := qtx.UpsertAppActionRule(r.Context(), db.UpsertAppActionRuleParams{
 			WorkspaceID: workspaceID, OwnerUserID: owner, ToolkitSlug: slug,
 			ActionClass: rule.ActionClass, Policy: rule.Policy, UpdatedBy: member.UserID,
 		}); err != nil {
@@ -606,6 +674,11 @@ func (h *Handler) UpdateAppRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save rules")
+		return
+	}
+	admission.admitted(r.Context())
 	rules, err := h.rulesResponse(r.Context(), workspaceID, slug, owner)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list rules")
@@ -851,7 +924,11 @@ func (h *Handler) UpdateAgentApps(w http.ResponseWriter, r *http.Request) {
 	seen := map[string]bool{}
 	type want struct{ slug, scope, level string }
 	var wants []want
+	teamAddition := ""
 	for _, app := range req.Apps {
+		if app.Level == "" {
+			app.Level = connectedapps.DefaultLevel(agent.PermissionMode)
+		}
 		slug := connectedapps.NormalizeSlug(app.ToolkitSlug)
 		if slug == "" || seen[slug] || !connectedapps.ValidScope(app.AccountScope) || !connectedapps.ValidLevel(app.Level) {
 			writeError(w, http.StatusBadRequest, "invalid app")
@@ -869,6 +946,9 @@ func (h *Handler) UpdateAgentApps(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "only workspace admins can give agents a team account")
 			return
 		}
+		if op := agentTeamAppAdds(prev, had, app.AccountScope, app.Level); op != "" && teamAddition == "" {
+			teamAddition = op
+		}
 		keep = append(keep, slug)
 		wants = append(wants, want{slug, app.AccountScope, app.Level})
 	}
@@ -878,6 +958,12 @@ func (h *Handler) UpdateAgentApps(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusForbidden, "only workspace admins can remove a team account from an agent")
 				return
 			}
+		}
+	}
+	var admission featureAdmission
+	if teamAddition != "" {
+		if admission, ok = h.requireFeatureAddition(w, r, workspaceID, entitlement.FeatureTeamAppAccounts, teamAddition); !ok {
+			return
 		}
 	}
 	tx, err := h.TxStarter.Begin(ctx)
@@ -908,6 +994,7 @@ func (h *Handler) UpdateAgentApps(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to save agent apps")
 		return
 	}
+	admission.admitted(ctx)
 	h.ListAgentApps(w, r)
 }
 
@@ -1144,20 +1231,22 @@ func (h *Handler) AppsGateway(w http.ResponseWriter, r *http.Request) {
 	h.ConnectedApps.ServeHTTP(w, r)
 }
 
-// ResumeAfterDecision implements connectedapps.Resumer: a run on the issue,
-// or a message in the chat from the person who decided.
 // CanActFor applies the rule that admits a new run of the agent to the
-// person a request waits on, so a decision never runs or resumes an agent
-// they could not start themselves.
+// authorizing human, or to a system principal when no human originator exists.
 func (h *Handler) CanActFor(ctx context.Context, workspaceID, agentID, userID pgtype.UUID) bool {
 	agent, err := h.Queries.GetAgent(ctx, agentID)
 	if err != nil || agent.WorkspaceID != workspaceID || agent.ArchivedAt.Valid {
 		return false
 	}
+	if !userID.Valid {
+		return h.canInvokeAgent(ctx, agent, "system", "", "", uuidToString(workspaceID))
+	}
 	uid := uuidToString(userID)
 	return h.canInvokeAgent(ctx, agent, "member", uid, uid, uuidToString(workspaceID))
 }
 
+// ResumeAfterDecision implements connectedapps.Resumer: a run on the issue,
+// or a message in the chat from the person who decided.
 func (h *Handler) ResumeAfterDecision(ctx context.Context, req db.AppActionRequest, actorID pgtype.UUID, note string) error {
 	if req.IssueID.Valid {
 		return h.TaskService.EnqueueAppDecisionRun(ctx, req.IssueID, req.AgentID, actorID, req.ID, note)

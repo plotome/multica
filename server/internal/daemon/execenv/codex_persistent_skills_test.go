@@ -80,3 +80,33 @@ func TestPersistentCodexSkillsReportAllocatedName(t *testing.T) {
 		t.Fatal("user skill changed")
 	}
 }
+
+func TestPersistentCodexSkillsTrackFinalDirectoriesAcrossRefresh(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	home := t.TempDir()
+	skills := []SkillContextForEnv{{ID: "one", Name: "Review", Content: "first"}, {ID: "two", Name: "Review", Content: "second"}}
+	var first os.FileInfo
+	for range 2 {
+		installed := make(map[string]string)
+		names, err := hydratePersistentCodexSkillsTracked(home, skills, nil, testLogger(), installed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, skill := range skills {
+			want := filepath.Join(home, "skills", names[i])
+			if installed[skill.ID] != want {
+				t.Fatalf("skill %s directory=%q want=%q", skill.ID, installed[skill.ID], want)
+			}
+			info, err := os.Stat(filepath.Join(want, "SKILL.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if i == 0 {
+				if first != nil && !os.SameFile(first, info) {
+					t.Fatal("tracking refresh replaced an unchanged skill")
+				}
+				first = info
+			}
+		}
+	}
+}

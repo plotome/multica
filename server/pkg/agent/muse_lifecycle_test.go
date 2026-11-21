@@ -4,11 +4,9 @@ import (
 	"context"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestRewriteFakeMuseServeReplacesExecutable(t *testing.T) {
@@ -47,33 +45,14 @@ func rewriteFakeMuseServe(t *testing.T, path, old, replacement string) {
 	if !strings.Contains(string(script), old) {
 		t.Fatalf("fake server does not contain %q", old)
 	}
-	// Never rewrite the executable inode in place. On Linux, an exec racing a
-	// writer on that inode fails with ETXTBSY even when the script is complete.
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".muse-rewrite-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(tmp.Name())
-	defer tmp.Close()
-	if _, err := tmp.Write([]byte(strings.Replace(string(script), old, replacement, 1))); err != nil {
-		t.Fatal(err)
-	}
-	if err := tmp.Chmod(0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := tmp.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		t.Fatal(err)
-	}
+	writeTestExecutable(t, path, []byte(strings.Replace(string(script), old, replacement, 1)))
 }
 
 func TestMuseHostExitAfterTurnStart(t *testing.T) {
 	t.Parallel()
 	bin, _, _ := writeFakeMuseServe(t, false)
 	rewriteFakeMuseServe(t, bin, "      sleep 0.02", "      exit 17")
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testFallbackTimeout)
 	defer cancel()
 	session, err := newFakeMuseBackend(t, bin).Execute(ctx, "work", ExecOptions{Cwd: t.TempDir()})
 	if err != nil {
@@ -92,7 +71,7 @@ func TestMuseTerminalSurvivesSessionCloseAndEOF(t *testing.T) {
       printf '{"jsonrpc":"2.0","method":"session/closed","params":{}}\n'
       exit 0
       #`)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testFallbackTimeout)
 	defer cancel()
 	session, err := newFakeMuseBackend(t, bin).Execute(ctx, "work", ExecOptions{Cwd: t.TempDir()})
 	if err != nil {
@@ -116,7 +95,7 @@ func TestMuseResumeAppliesSelectedModel(t *testing.T) {
 			if reject {
 				rewriteFakeMuseServe(t, bin, `"result":{"sessionId":"`+fakeMuseSessionID+`","modelId":"new-model"}`, `"error":{"code":-32602,"message":"model unavailable"}`)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), testFallbackTimeout)
 			defer cancel()
 			session, err := newFakeMuseBackend(t, bin).Execute(ctx, "continue", ExecOptions{
 				Cwd: t.TempDir(), ResumeSessionID: fakeMuseSessionID, Model: "new-model",

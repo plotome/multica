@@ -79,3 +79,61 @@ func TestFinishedGroupRecognizesStalePermissionError(t *testing.T) {
 		t.Fatal("a group gone after an earlier EPERM must be recognized as finished")
 	}
 }
+
+// A signal can race kernel teardown even while the next membership check
+// still sees a live/exiting member. Completion must be verified afterwards.
+func TestFinishVerifiesExitAfterPermissionRace(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "sleep 30")
+	if _, err := newController(cmd); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() }()
+	calls := 0
+	err := finishGroup(cmd.Process.Pid, func(pid int, sig syscall.Signal) error {
+		calls++
+		if pid != -cmd.Process.Pid {
+			t.Fatalf("unexpected group %d", pid)
+		}
+		switch calls {
+		case 1:
+			if sig != 0 {
+				t.Fatalf("first probe signal %v", sig)
+			}
+			return nil
+		case 2:
+			if sig != syscall.SIGKILL {
+				t.Fatalf("cleanup signal %v", sig)
+			}
+			return syscall.EPERM
+		default:
+			if sig != 0 {
+				t.Fatalf("exit probe signal %v", sig)
+			}
+			return syscall.ESRCH
+		}
+	})
+	if err != nil {
+		t.Fatalf("verified exit after transient signal error: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("got %d signal calls, want initial probe, cleanup, exit proof", calls)
+	}
+}
+
+func TestFinishPreservesLiveGroupPermissionError(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "sleep 30")
+	if _, err := newController(cmd); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() }()
+	err := finishGroup(cmd.Process.Pid, func(int, syscall.Signal) error { return syscall.EPERM })
+	if !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("live denied group error = %v, want EPERM", err)
+	}
+}

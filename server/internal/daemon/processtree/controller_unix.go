@@ -25,7 +25,7 @@ func newController(cmd *exec.Cmd) (*controller, error) {
 
 func (*controller) attach(_ *exec.Cmd) error { return nil }
 
-func (*controller) interrupt(cmd *exec.Cmd) error {
+func (c *controller) interrupt(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return os.ErrProcessDone
 	}
@@ -33,18 +33,28 @@ func (*controller) interrupt(cmd *exec.Cmd) error {
 		if groupHasFinished(cmd.Process.Pid, err) {
 			return nil
 		}
+		if errors.Is(err, syscall.EPERM) {
+			// A permission result may race group teardown. The shared finish
+			// path proves completion within its existing deadline.
+			return c.finish(cmd)
+		}
 		return err
 	}
 	return nil
 }
 
-func (*controller) stop(cmd *exec.Cmd) error {
+func (c *controller) stop(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return os.ErrProcessDone
 	}
 	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
 		if groupHasFinished(cmd.Process.Pid, err) {
 			return nil
+		}
+		if errors.Is(err, syscall.EPERM) {
+			// A permission result may race group teardown. The shared finish
+			// path proves completion within its existing deadline.
+			return c.finish(cmd)
 		}
 		return cmd.Process.Kill()
 	}
@@ -55,27 +65,39 @@ func (c *controller) finish(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return nil
 	}
-	pid := cmd.Process.Pid
-	if err := syscall.Kill(-pid, 0); groupHasFinished(cmd.Process.Pid, err) {
+	return finishGroup(cmd.Process.Pid, syscall.Kill)
+}
+
+// finishGroup keeps signal delivery and subsequent liveness checks separate.
+func finishGroup(pid int, signal func(int, syscall.Signal) error) error {
+	if err := signal(-pid, 0); groupHasFinished(pid, err) {
 		return nil
 	}
 	// A normally-exited leader can still leave a descendant holding inherited
 	// pipes or repository locks. Kill the remaining group before returning
 	// ownership of the repository to another operation.
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !groupHasFinished(cmd.Process.Pid, err) {
-		return err
+	signalErr := signal(-pid, syscall.SIGKILL)
+	if groupHasFinished(pid, signalErr) {
+		return nil
 	}
+	if signalErr != nil && !errors.Is(signalErr, syscall.EPERM) {
+		return signalErr
+	}
+	// Darwin's signal and process snapshots can observe different teardown
+	// phases. EPERM is neither success nor a final failure here: use the
+	// existing finish deadline to prove exit, retaining the error if the
+	// group stays live. Never return repository ownership on EPERM alone.
 	deadline := time.Now().Add(processTreeFinishTimeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		lastErr = syscall.Kill(-pid, 0)
-		if groupHasFinished(cmd.Process.Pid, lastErr) {
+		lastErr = signal(-pid, 0)
+		if groupHasFinished(pid, lastErr) {
 			return nil
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if lastErr != nil {
-		return fmt.Errorf("process group %d still active after %s: %w", pid, processTreeFinishTimeout, lastErr)
+	if err := errors.Join(signalErr, lastErr); err != nil {
+		return fmt.Errorf("process group %d still active after %s: %w", pid, processTreeFinishTimeout, err)
 	}
 	return fmt.Errorf("process group %d still active after %s", pid, processTreeFinishTimeout)
 }

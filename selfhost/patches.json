@@ -179,7 +179,9 @@
         "TestCandidateFailureRestoresBaselineAndRemainsFailed",
         "TestRestorationResumesAfterUpdaterProcessDeath",
         "TestFinishedGroupRecognizesStalePermissionError",
-        "TestLiveGroupPermissionErrorIsNotCompletion"
+        "TestLiveGroupPermissionErrorIsNotCompletion",
+        "TestFinishVerifiesExitAfterPermissionRace",
+        "TestFinishPreservesLiveGroupPermissionError"
       ]
     },
     {

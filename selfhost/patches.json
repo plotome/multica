@@ -66,7 +66,8 @@
         "TestTaskElicitationExpiryAndDenialNeverGrant",
         "TestTaskElicitationConcurrentConsumptionIsSingleUse",
         "TestTaskElicitationCardServiceRequiresOwnerReceiptAndRejectsTaskToken",
-        "TestCodexElicitationCancelsThenDeliversStructuredResultToExactTurn"
+        "TestCodexElicitationCancelsThenDeliversStructuredResultToExactTurn",
+        "TestEveryRouteByProjectObjectIDHidesPrivateProjects"
       ]
     },
     {
@@ -176,7 +177,11 @@
       "required_tests": [
         "TestVersionJSONIncludesExactBuildCommit",
         "TestCandidateFailureRestoresBaselineAndRemainsFailed",
-        "TestRestorationResumesAfterUpdaterProcessDeath"
+        "TestRestorationResumesAfterUpdaterProcessDeath",
+        "TestFinishedGroupRecognizesStalePermissionError",
+        "TestLiveGroupPermissionErrorIsNotCompletion",
+        "TestFinishVerifiesExitAfterPermissionRace",
+        "TestFinishPreservesLiveGroupPermissionError"
       ]
     },
     {

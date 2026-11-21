@@ -166,6 +166,8 @@ VALUES (gen_random_uuid(), $1, $2, '{}'::jsonb, 'pending')`, row.task, row.works
 }
 
 func TestTaskElicitationCardServiceRequiresOwnerReceiptAndRejectsTaskToken(t *testing.T) {
+	projectID := dbfx.Project(t, "Private approval fixture", testutil.Cols{"visibility": "private"})
+	addProjectMemberRow(t, projectID, testUserID)
 	f, id := newApprovalFixture(t)
 	serviceID := uuid.NewString()
 	t.Setenv("COMPUTER_USE_CARD_SERVICE_USER_ID", serviceID)
@@ -186,8 +188,15 @@ func TestTaskElicitationCardServiceRequiresOwnerReceiptAndRejectsTaskToken(t *te
 	machine := request(&receipt)
 	machine.Header.Set("X-Actor-Source", "task_token")
 	testutil.Call(t, testHandler.RespondTaskElicitation, machine).Want(403)
+	// The service is outside the private project; the signed owner is inside.
+	dbfx.Exec(t, `UPDATE issue SET project_id=$1 WHERE id=$2`, projectID, f.issueID)
 	testutil.Call(t, testHandler.RespondTaskElicitation, request(&receipt)).Want(200)
 	testutil.Call(t, testHandler.RespondTaskElicitation, request(&receipt)).Want(409)
+	removeProjectMemberRow(t, projectID, testUserID)
+	// Device ownership and a valid service receipt cannot bypass project
+	// visibility after the human owner loses access.
+	testutil.Call(t, testHandler.RespondTaskElicitation, request(&receipt)).Want(404)
+	testutil.Call(t, testHandler.ListTaskElicitations, approvalHumanRequest(f.taskID, id, "once")).Want(404)
 }
 
 func TestTaskElicitationConcurrentConsumptionIsSingleUse(t *testing.T) {

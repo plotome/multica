@@ -14,6 +14,10 @@ import (
 // made through user-skill symlinks, and no-op refreshes preserve visible paths,
 // file identity and timestamps. The caller holds the conversation lease.
 func hydratePersistentCodexSkills(home string, workspace []SkillContextForEnv, disabled []RuntimeSkillRefForEnv, logger *slog.Logger) ([]string, error) {
+	return hydratePersistentCodexSkillsTracked(home, workspace, disabled, logger, nil)
+}
+
+func hydratePersistentCodexSkillsTracked(home string, workspace []SkillContextForEnv, disabled []RuntimeSkillRefForEnv, logger *slog.Logger, installed map[string]string) ([]string, error) {
 	stage, err := os.MkdirTemp(home, ".skills-prepare-")
 	if err != nil {
 		return nil, err
@@ -23,7 +27,8 @@ func hydratePersistentCodexSkills(home string, workspace []SkillContextForEnv, d
 		return nil, err
 	}
 	wanted := filepath.Join(stage, "skills")
-	preparedSkillNames, err := writeSkillFilesWithNames(wanted, workspace, nil)
+	staged := make(map[string]string)
+	preparedSkillNames, err := writeSkillFilesWithNamesTracked(wanted, workspace, nil, staged)
 	if err != nil {
 		return nil, err
 	}
@@ -66,6 +71,15 @@ func hydratePersistentCodexSkills(home string, workspace []SkillContextForEnv, d
 			if err := os.RemoveAll(filepath.Join(actual, entry.Name())); err != nil {
 				return nil, err
 			}
+		}
+	}
+	for id, path := range staged {
+		if installed != nil {
+			rel, err := filepath.Rel(wanted, path)
+			if err != nil {
+				return nil, err
+			}
+			installed[id] = filepath.Join(actual, rel)
 		}
 	}
 	preparedTask := ApplyPreparedSkillNames(TaskContextForEnv{AgentSkills: workspace}, preparedSkillNames)

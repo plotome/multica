@@ -14,6 +14,7 @@ import { useAuthStore } from "@multica/core/auth";
 import { useFeatureEnabled } from "@multica/core/config";
 import { COMPOSIO_MCP_APPS_FLAG } from "@multica/core/feature-flags";
 import { useWorkspaceId } from "@multica/core/hooks";
+import { FEATURE_LOCKED_CODE, workspaceFeatureKeys } from "@multica/core/billing";
 import {
   chatAppRequestsOptions,
   connectedAppsKeys,
@@ -24,9 +25,12 @@ import { useActorName } from "@multica/core/workspace/hooks";
 import type { AppRequest } from "@multica/core/types";
 import { useLocale, useT } from "../i18n";
 import { currentPath, useNavigation } from "../navigation";
+import { isDesktopShell, openExternal } from "../platform";
 
 const CONNECTED_PARAM = "app_connected";
 const CONNECT_ERROR_PARAM = "app_connect_error";
+// Set next to the error when the plan refused the account; older servers omit it.
+const CONNECT_ERROR_REASON_PARAM = "app_connect_error_reason";
 let lastConnectReturn = "";
 
 /**
@@ -37,11 +41,13 @@ let lastConnectReturn = "";
  */
 function useConnectReturn() {
   const { t } = useT("settings");
+  const { t: tBilling } = useT("billing");
   const navigation = useNavigation();
   const qc = useQueryClient();
   const wsId = useWorkspaceId();
   const connected = navigation.searchParams?.get(CONNECTED_PARAM) ?? null;
   const failed = navigation.searchParams?.get(CONNECT_ERROR_PARAM) ?? null;
+  const failedReason = navigation.searchParams?.get(CONNECT_ERROR_REASON_PARAM) ?? null;
   useEffect(() => {
     const app = connected ?? failed;
     if (!app) return;
@@ -52,12 +58,16 @@ function useConnectReturn() {
     if (connected) {
       toast.success(t(($) => $.connected_apps.request.connected_resumed, { app }));
       void qc.invalidateQueries({ queryKey: connectedAppsKeys.all(wsId) });
+    } else if (failedReason === FEATURE_LOCKED_CODE) {
+      toast.error(tBilling(($) => $.paid_feature.locked_error));
+      void qc.invalidateQueries({ queryKey: workspaceFeatureKeys.all(wsId) });
     } else {
       toast.error(t(($) => $.connected_apps.toast_connect_failed));
     }
     const params = new URLSearchParams(navigation.searchParams);
     params.delete(CONNECTED_PARAM);
     params.delete(CONNECT_ERROR_PARAM);
+    params.delete(CONNECT_ERROR_REASON_PARAM);
     const search = params.toString();
     navigation.replace(`${navigation.pathname}${search ? `?${search}` : ""}${navigation.hash}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -254,7 +264,10 @@ function AppRequestCard({
       // The callback appends its own query, so the fragment stays behind.
       const returnTo = currentPath({ ...navigation, hash: "" });
       const { redirect_url } = await api.connectApp("personal", app, returnTo);
-      window.location.href = redirect_url;
+      openExternal(redirect_url, { webTarget: "same-tab" });
+      // Desktop opens the hosted flow in the system browser and stays here;
+      // the card resolves through the request's realtime update.
+      if (isDesktopShell()) setConnecting(false);
     } catch {
       toast.error(t(($) => $.connected_apps.toast_failed));
       setConnecting(false);

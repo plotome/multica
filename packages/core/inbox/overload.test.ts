@@ -15,7 +15,13 @@ it.each(["listInbox", "listSnoozedInbox", "getInboxUnreadSummary"] as const)(
     vi.stubGlobal("fetch", fetch);
     const controller = new AbortController();
     await new ApiClient("https://api.example.test")[method](controller.signal);
-    expect(fetch.mock.calls[0]![1].signal).toBe(controller.signal);
+    const forwarded = fetch.mock.calls[0]![1].signal as AbortSignal;
+    expect(forwarded).toBeInstanceOf(AbortSignal);
+    expect(forwarded.aborted).toBe(false);
+    const reason = new Error("caller cancelled");
+    controller.abort(reason);
+    expect(forwarded.aborted).toBe(true);
+    expect(forwarded.reason).toBe(reason);
   },
 );
 

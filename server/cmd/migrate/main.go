@@ -201,6 +201,13 @@ var concurrentIndexCleanups = map[string]string{
 	"652_issue_environment_issue_idx":                           "idx_issue_environment_issue",
 	"651_issue_environment_task_key_idx":                        "uq_issue_environment_task_key",
 	"649_project_member_user_idx":                               "idx_project_member_workspace_user",
+	"746_remote_app_connection_workspace_idx":                   "uq_remote_app_connection_owner_ws",
+	"737_remote_app_oauth_client_idx":                           "uq_remote_app_oauth_client_app_redirect",
+	"738_remote_app_connection_owner_idx":                       "uq_remote_app_connection_owner",
+	"731_doc_collab_state_pkey_index":                           "doc_collab_state_pkey_idx",
+	"733_doc_revision_pkey_index":                               "doc_revision_pkey_idx",
+	"741_issue_description_collab_state_pkey_index":             "issue_description_collab_state_pkey_idx",
+	"743_issue_description_revision_pkey_index":                 "issue_description_revision_pkey_idx",
 	"563_search_index_change_changed_at_index":                  "idx_search_index_change_changed_at",
 	"562_search_index_change_workspace_index":                   "idx_search_index_change_workspace_xid",
 	"552_agent_task_history_page_index":                         "idx_agent_task_queue_history_page",
@@ -432,6 +439,7 @@ var concurrentIndexCleanups = map[string]string{
 // cases need direction-specific cleanup before the rollback can retry safely.
 var concurrentDownIndexCleanups = map[string]string{
 	"548_task_supplement_comment_task_index":                "task_supplement_comment_uidx",
+	"747_drop_remote_app_connection_owner_idx":              "uq_remote_app_connection_owner",
 	"144_drop_agent_task_queue_chat_pending_v1":             "idx_agent_task_queue_chat_pending",
 	"171_drop_legacy_label_namespace_index":                 "issue_label_workspace_name_lower_idx",
 	"256_drop_agent_task_queue_chat_pending_v2":             "idx_agent_task_queue_chat_pending_v2",

@@ -154,6 +154,7 @@ func (s *fakeStore) UpsertUserComposioConnection(_ context.Context, arg db.Upser
 	row := db.UserComposioConnection{
 		ID:                 mintUUID(s.nextID),
 		UserID:             arg.UserID,
+		WorkspaceID:        arg.WorkspaceID,
 		ToolkitSlug:        arg.ToolkitSlug,
 		AuthConfigID:       arg.AuthConfigID,
 		ConnectedAccountID: arg.ConnectedAccountID,
@@ -166,7 +167,17 @@ func (s *fakeStore) UpsertUserComposioConnection(_ context.Context, arg db.Upser
 	return row, nil
 }
 
-func (s *fakeStore) ListActiveUserComposioConnections(_ context.Context, userID pgtype.UUID) ([]db.UserComposioConnection, error) {
+func (s *fakeStore) ListActiveUserComposioConnections(_ context.Context, arg db.ListActiveUserComposioConnectionsParams) ([]db.UserComposioConnection, error) {
+	out := []db.UserComposioConnection{}
+	for _, r := range s.rows {
+		if uuidEqual(r.UserID, arg.UserID) && r.Status == "active" && (!r.WorkspaceID.Valid || uuidEqual(r.WorkspaceID, arg.WorkspaceID)) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (s *fakeStore) ListAllActiveUserComposioConnections(_ context.Context, userID pgtype.UUID) ([]db.UserComposioConnection, error) {
 	out := []db.UserComposioConnection{}
 	for _, r := range s.rows {
 		if uuidEqual(r.UserID, userID) && r.Status == "active" {

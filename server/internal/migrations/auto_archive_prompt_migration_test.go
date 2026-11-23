@@ -94,11 +94,11 @@ func TestAutoArchivePromptAsksOnlyMembersWhoArchived(t *testing.T) {
 		t.Fatalf("seed fixture: %v", err)
 	}
 
-	if _, err := conn.Exec(ctx, readMigrationFile(t, "718_auto_archive_prompt.up.sql")); err != nil {
-		t.Fatalf("apply 718 up: %v", err)
+	if _, err := conn.Exec(ctx, readMigrationFile(t, "735_auto_archive_prompt.up.sql")); err != nil {
+		t.Fatalf("apply 735 up: %v", err)
 	}
-	if _, err := conn.Exec(ctx, readMigrationFile(t, "722_auto_archive_agent_trigger_prompt.up.sql")); err != nil {
-		t.Fatalf("apply 722 up: %v", err)
+	if _, err := conn.Exec(ctx, readMigrationFile(t, "739_auto_archive_agent_trigger_prompt.up.sql")); err != nil {
+		t.Fatalf("apply 739 up: %v", err)
 	}
 
 	stored := func() map[string]map[string]string {
@@ -157,8 +157,8 @@ func TestAutoArchivePromptAsksOnlyMembersWhoArchived(t *testing.T) {
 		}
 	}
 
-	if _, err := conn.Exec(ctx, readMigrationFile(t, "722_auto_archive_agent_trigger_prompt.down.sql")); err != nil {
-		t.Fatalf("apply 722 down: %v", err)
+	if _, err := conn.Exec(ctx, readMigrationFile(t, "739_auto_archive_agent_trigger_prompt.down.sql")); err != nil {
+		t.Fatalf("apply 739 down: %v", err)
 	}
 	for key, prefs := range stored() {
 		if _, ok := prefs["auto_archive_on_agent_trigger"]; ok {
@@ -166,8 +166,8 @@ func TestAutoArchivePromptAsksOnlyMembersWhoArchived(t *testing.T) {
 		}
 	}
 
-	if _, err := conn.Exec(ctx, readMigrationFile(t, "718_auto_archive_prompt.down.sql")); err != nil {
-		t.Fatalf("apply 718 down: %v", err)
+	if _, err := conn.Exec(ctx, readMigrationFile(t, "735_auto_archive_prompt.down.sql")); err != nil {
+		t.Fatalf("apply 735 down: %v", err)
 	}
 	for key, prefs := range stored() {
 		if _, ok := prefs["auto_archive_prompt"]; ok {

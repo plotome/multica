@@ -1,6 +1,6 @@
 -- MUL-9820: the default auto-archive preset now archives when you complete an
 -- issue or trigger an agent, rather than on any comment, status advance or
--- reassignment. Keep the one-time prompt rows seeded by migration 718 on their
+-- reassignment. Keep the one-time prompt rows seeded by migration 735 on their
 -- pre-release behavior (completing only) by also muting
 -- auto_archive_on_agent_trigger until the member answers. Any value they
 -- already stored wins.

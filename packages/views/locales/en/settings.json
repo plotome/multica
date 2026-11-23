@@ -1604,7 +1604,7 @@
     },
     "coordinated_updates": {
       "title": "Coordinated updates",
-      "checking": "Checking for a verified candidate…",
+      "checking": "Checking for a verified candidate...",
       "unavailable": "The private update channel is unavailable.",
       "invalid": "The update response could not be verified.",
       "refresh": "Refresh",

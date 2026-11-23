@@ -1588,7 +1588,7 @@
     },
     "coordinated_updates": {
       "title": "协调更新",
-      "checking": "正在检查已验证候选…",
+      "checking": "正在检查已验证候选...",
       "unavailable": "私有更新通道暂不可用。",
       "invalid": "更新响应无法核验。",
       "refresh": "刷新",

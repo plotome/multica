@@ -58,6 +58,7 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"chat_wakeup":                        workspaceDelete,
 	"client_usage_daily":                 workspaceDeleteDetach,
 	"comment":                            workspaceDelete,
+	"comment_idempotency_receipt":        workspaceDelete,
 	"comment_reaction":                   workspaceDelete,
 	"device_maintenance":                 workspaceDeleteKeep, // Device-wide lease; deleting one workspace must not release other scopes.
 	"device_maintenance_event":           workspaceDeleteKeep, // Device audit survives workspace teardown.

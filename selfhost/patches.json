@@ -105,13 +105,15 @@
       "absent_files": [
         "server/internal/daemon/warm_pool.go",
         "server/internal/daemon/warm_backend.go",
-        "server/pkg/agent/codex_warm.go"
+        "server/pkg/agent/codex_warm.go",
+        "server/pkg/agent/codex_process.go"
       ],
       "required_tests": [
         "TestCodexStartOrResumeThreadResumesPriorThread",
         "TestCodexTurnNotificationGateDropsResumeReplayAndOtherTurns",
         "TestConfigureCodexTaskShellEnvironment",
-        "TestCodexTaskShellEnvInheritsRealHome"
+        "TestCodexTaskShellEnvInheritsRealHome",
+        "TestCodexIgnoresWarmPoolAndIsolatesTaskCredentials"
       ]
     },
     {

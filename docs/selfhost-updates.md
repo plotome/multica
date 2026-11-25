@@ -116,3 +116,9 @@ Runtime application approvals and owner-managed late environment names follow
 Promote server, daemon and the Web/Desktop approval UI together; a CLI-only
 upgrade cannot supply human approval UI or database endpoints. Native adapter
 hooks and real consumer acceptance remain separate deployment prerequisites.
+
+Doc discussions use the same conversation isolation and persistent physical
+checkout contract as issue/chat runs. Doc checkout GC uses the configured
+persistent-worktree idle retention, since documents have no terminal status;
+active conversation locks protect them during execution. Delivered branches
+survive checkout collection.

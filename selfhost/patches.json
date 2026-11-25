@@ -9,7 +9,8 @@
       ],
       "required_tests": [
         "TestRunIssueCancelTaskByIssue",
-        "TestRunIssueListOpenFiltersByUnfinishedCategory"
+        "TestRunIssueListOpenFiltersByUnfinishedCategory",
+        "TestRunIssueListOpenCombinesWithBlocked"
       ]
     },
     {
@@ -93,7 +94,10 @@
         "TestPersistentLocalWorktreeSeparatesAgents",
         "TestIsolatedPrepareReusesPersistentPhysicalWorktree",
         "TestPersistentLocalWorktreeCrashRecoveryDoesNotCommitRuntimeArtifacts",
-        "TestPrunePersistentLocalWorktreesSkipsLockedConversation"
+        "TestPrunePersistentLocalWorktreesSkipsLockedConversation",
+        "TestIsolatedPrepareReusesPersistentDocWorktree",
+        "TestAcquireLocalDirectoryLockSerializesPersistentDocConversation",
+        "TestPrunePersistentDocWorktreesUsesIdleRetentionAndLock"
       ]
     },
     {
@@ -145,7 +149,8 @@
         "TestPersistentCodexSkillsReconcileAndPreserveNative",
         "TestCodexPersistentHomePreLaunchFailureNeedsNoRecovery",
         "TestCodexPersistentHomeNeverFallsBackFromResume",
-        "TestCodexPersistentHomeReportsProcessCleanup"
+        "TestCodexPersistentHomeReportsProcessCleanup",
+        "TestCodexConversationHomeDocContinuityAndIsolation"
       ]
     },
     {

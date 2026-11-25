@@ -1,7 +1,7 @@
 # Codex conversation state
 
 New Codex conversations on macOS/Linux use a dedicated `CODEX_HOME` per
-profile, workspace, agent and issue/chat, with separate generations for fresh
+profile, workspace, agent and issue/chat/doc, with separate generations for fresh
 sessions. Execution roots keep their existing Prepare/Reuse lifecycle;
 subprocesses and task credentials are refreshed per run.
 The daemon holds the conversation's OS lock before configuration preparation

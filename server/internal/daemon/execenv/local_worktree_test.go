@@ -2878,3 +2878,62 @@ func TestIsolatedPrepareKeepsTheReadOnlyBranchDrop(t *testing.T) {
 		t.Error("a turn that changed nothing left its branch behind")
 	}
 }
+
+func TestIsolatedPrepareReusesPersistentDocWorktree(t *testing.T) {
+	repo := newTestRepo(t)
+	workspacesRoot := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	turn := func(taskID string) *Environment {
+		t.Helper()
+		env, err := PrepareIsolated(ctx, preparationHelperTestCommand(), PrepareParams{
+			WorkspacesRoot:  workspacesRoot,
+			WorkspaceID:     testBranchOwner.WorkspaceID,
+			TaskID:          taskID,
+			IssueIdentifier: "MUL-6881",
+			Provider:        "claude",
+			AgentName:       "J",
+			Task: TaskContextForEnv{
+				DocID:   testBranchOwner.ConversationID,
+				AgentID: testBranchOwner.AgentID,
+			},
+			LocalWorktree: &LocalWorktreeParams{
+				LocalPath:      repo,
+				PersistentRoot: workspacesRoot,
+			},
+		}, worktreeTestLogger())
+		if err != nil {
+			t.Fatalf("PrepareIsolated(%s): %v", taskID, err)
+		}
+		if !env.LocalWorktree.Persistent || env.LocalWorktree.PersistentEntryRoot == "" {
+			t.Fatalf("persistent state lost across helper: %+v", env.LocalWorktree)
+		}
+		return env
+	}
+	finalize := func(env *Environment) {
+		t.Helper()
+		if err := CleanupRuntimeConfig(env.WorkDir, "claude"); err != nil {
+			t.Fatalf("CleanupRuntimeConfig: %v", err)
+		}
+		if err := CleanupSidecars(env.RootDir); err != nil {
+			t.Fatalf("CleanupSidecars: %v", err)
+		}
+		if _, err := env.LocalWorktree.Finalize(worktreeTestLogger()); err != nil {
+			t.Fatalf("Finalize: %v", err)
+		}
+	}
+
+	first := turn(turnOneTask)
+	writeFile(t, filepath.Join(first.WorkDir, "agent.txt"), "first turn\n")
+	finalize(first)
+	second := turn(turnTwoTask)
+	if second.WorkDir != first.WorkDir {
+		t.Fatalf("second cwd = %q, want stable %q", second.WorkDir, first.WorkDir)
+	}
+	if got := readFile(t, filepath.Join(second.WorkDir, "agent.txt")); got != "first turn\n" {
+		t.Fatalf("second turn lost first turn output: %q", got)
+	}
+	finalize(second)
+	removePersistentForTest(t, second.LocalWorktree)
+}

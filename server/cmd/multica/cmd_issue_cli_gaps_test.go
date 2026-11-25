@@ -127,3 +127,17 @@ func TestRunIssueListOpenFiltersByUnfinishedCategory(t *testing.T) {
 		t.Fatalf("err=%v requests=%d, want mutual-exclusion error before any request", err, len(*queries))
 	}
 }
+
+func TestRunIssueListOpenCombinesWithBlocked(t *testing.T) {
+	queries, _ := newPropertyFilterTestServer(t)
+	if err := listIssuesWithFlags(t, map[string][]string{"open": {"true"}, "blocked": {"true"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*queries) != 1 {
+		t.Fatalf("requests=%d, want 1", len(*queries))
+	}
+	q := (*queries)[0]
+	if q.Get("status_category") != "unstarted,started" || q.Get("blocked") != "true" || q.Has("status") {
+		t.Fatalf("open+blocked query=%v", q)
+	}
+}

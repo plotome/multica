@@ -446,11 +446,13 @@ func codexSessionStoreNamespace(profile string) string {
 func codexSessionStoreKey(profile string, task TaskContextForEnv) string {
 	storeID := sanitizePathSegment(task.IssueID)
 	if storeID == "" {
-		chatID := sanitizePathSegment(task.ChatSessionID)
-		if chatID == "" {
+		if chatID := sanitizePathSegment(task.ChatSessionID); chatID != "" {
+			storeID = "chat_" + chatID
+		} else if docID := sanitizePathSegment(task.DocID); docID != "" {
+			storeID = "doc_" + docID
+		} else {
 			return ""
 		}
-		storeID = "chat_" + chatID
 	}
 	agent := sanitizePathSegment(task.AgentID)
 	if agent == "" {
@@ -725,7 +727,7 @@ func touchCodexSessionStore(storeDir string, logger *slog.Logger) {
 }
 
 // CodexSessionStorePath returns the per-conversation Codex session store on the
-// shared home, or "" when there is no stable issue or chat key. The daemon
+// shared home, or "" when there is no stable issue, chat or doc key. The daemon
 // marks this path in-use for the duration of a task so
 // PruneCodexSessionStores never reclaims a store mid-mount, closing the
 // stat→remove race the mtime refresh alone cannot (MUL-4424).

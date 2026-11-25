@@ -2701,6 +2701,12 @@ func TestGCMetaForTask(t *testing.T) {
 			idOK: func(m execenv.GCMeta) bool { return m.TaskID == "t4" },
 		},
 		{
+			name: "doc discussion task",
+			task: Task{ID: "t6", WorkspaceID: "ws", DocID: "d1"},
+			want: execenv.GCKindDoc,
+			idOK: func(m execenv.GCMeta) bool { return m.DocID == "d1" },
+		},
+		{
 			name: "chat wins over issue when both set (defensive ordering)",
 			task: Task{ID: "t5", WorkspaceID: "ws", IssueID: "i1", ChatSessionID: "c1"},
 			want: execenv.GCKindChat,
@@ -2830,5 +2836,39 @@ func TestShouldCleanTaskDir_LocalDirectoryFalsePreservesNormalClean(t *testing.T
 
 	if got := d.shouldCleanTaskDir(context.Background(), taskDir); got != gcActionClean {
 		t.Fatalf("expected gcActionClean for normal task, got %d", got)
+	}
+}
+
+func TestPrunePersistentDocWorktreesUsesIdleRetentionAndLock(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		ttl    time.Duration
+		locked bool
+		want   int
+	}{
+		{"expired", 24 * time.Hour, false, 1},
+		{"recent", 72 * time.Hour, false, 0},
+		{"locked", 24 * time.Hour, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newGCTestDaemon(t, http.NewServeMux())
+			d.cfg.GCPersistentLocalWorktreeTTL = tc.ttl
+			repo, record := createPersistentGCWorktree(t, d, string(execenv.GCKindDoc), "11112222-3333-4444-5555-000000000008")
+			if tc.locked {
+				release, err := d.localPathLocks.Acquire(t.Context(), record.EntryRoot, "running-doc-task", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer release()
+			}
+			stats := &gcStats{}
+			d.prunePersistentLocalWorktrees(t.Context(), stats)
+			if stats.persistentWorktreesReclaimed != tc.want {
+				t.Fatalf("reclaimed=%d want=%d", stats.persistentWorktreesReclaimed, tc.want)
+			}
+			if !gitRefExists(t, repo, "refs/heads/"+record.Branch) {
+				t.Fatal("delivered doc branch was deleted")
+			}
+		})
 	}
 }

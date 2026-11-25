@@ -62,7 +62,7 @@ func PersistentLocalWorktreeEntryPath(workspacesRoot, localPath, workspaceID, ag
 	if strings.TrimSpace(workspacesRoot) == "" || workspaceID == "" || agentID == "" || conversationID == "" {
 		return "", errors.New("execenv: persistent local worktree requires workspaces root, workspace, agent, and conversation ids")
 	}
-	if conversationKind != string(GCKindIssue) && conversationKind != string(GCKindChat) {
+	if conversationKind != string(GCKindIssue) && conversationKind != string(GCKindChat) && conversationKind != string(GCKindDoc) {
 		return "", fmt.Errorf("execenv: unsupported persistent local worktree conversation kind %q", conversationKind)
 	}
 	gitRoot, err := resolveGitRoot(localPath)
@@ -121,7 +121,7 @@ func readPersistentLocalWorktreeRecord(entryRoot string) (PersistentLocalWorktre
 		record.ConversationID == "" || record.GitRoot == "" || record.WorktreePath == "" || record.WorkDir == "" || record.Branch == "" || record.Provider == "" {
 		return PersistentLocalWorktreeRecord{}, errors.New("persistent local worktree state is incomplete or has an unsupported version")
 	}
-	if record.ConversationKind != string(GCKindIssue) && record.ConversationKind != string(GCKindChat) {
+	if record.ConversationKind != string(GCKindIssue) && record.ConversationKind != string(GCKindChat) && record.ConversationKind != string(GCKindDoc) {
 		return PersistentLocalWorktreeRecord{}, fmt.Errorf("persistent local worktree has unsupported conversation kind %q", record.ConversationKind)
 	}
 	wantPath := persistentLocalWorktreePath(entryRoot)

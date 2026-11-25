@@ -85,6 +85,8 @@
         "TestPersistentLocalWorktreeConfig",
         "TestPersistentLocalWorktreeRecoversMissingState",
         "TestPersistentLocalWorktreeRetryAfterPreparationTimeout",
+        "TestLocalWorktreeRetriesAfterKilledWorktreeAdd",
+        "TestPersistentLocalWorktreeClearsMissingInitializingRegistration",
         "TestRunTaskWorktreeQueueDoesNotSpendPrepareBudget",
         "TestPersistentLocalWorktreeReusesPhysicalCheckoutAndRefreshesUserState",
         "TestPersistentLocalWorktreeChangesProjectDirectory",

@@ -448,3 +448,52 @@ func TestCodexConversationHomeRejectsLinkedState(t *testing.T) {
 		t.Fatal("GC removed external target")
 	}
 }
+
+func TestCodexConversationHomeDocContinuityAndIsolation(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	p := conversationHomeParams()
+	p.Task.DocID, p.Task.IssueID = p.Task.IssueID, ""
+	first, err := ClaimCodexConversationHome(p)
+	if err != nil || first == nil {
+		t.Fatalf("claim doc home: lease=%v err=%v", first, err)
+	}
+	home := first.Home()
+	if err := first.BindSession("doc-thread"); err != nil {
+		t.Fatal(err)
+	}
+	first.Release()
+	p.TaskID = "second"
+	p.ResumeSessionID = "doc-thread"
+	second, err := ClaimCodexConversationHome(p)
+	if err != nil || second == nil {
+		t.Fatalf("resume doc home: lease=%v err=%v", second, err)
+	}
+	if second.Home() != home {
+		t.Fatalf("doc resume home = %q, want %q", second.Home(), home)
+	}
+	second.Release()
+	for _, kind := range []string{"issue", "chat", "another-doc", "another-agent"} {
+		t.Run(kind, func(t *testing.T) {
+			other := p
+			other.ResumeSessionID = ""
+			switch kind {
+			case "issue":
+				other.Task.IssueID, other.Task.DocID = other.Task.DocID, ""
+			case "chat":
+				other.Task.ChatSessionID, other.Task.DocID = other.Task.DocID, ""
+			case "another-doc":
+				other.Task.DocID = "other-doc"
+			case "another-agent":
+				other.Task.AgentID = "other-agent"
+			}
+			lease, err := ClaimCodexConversationHome(other)
+			if err != nil || lease == nil {
+				t.Fatalf("claim isolated home: lease=%v err=%v", lease, err)
+			}
+			defer lease.Release()
+			if lease.Home() == home {
+				t.Fatal("doc home leaked across conversation identity")
+			}
+		})
+	}
+}

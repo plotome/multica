@@ -52,6 +52,9 @@ func codexConversationIdentity(p CodexConversationHomeParams) string {
 	if id == "" {
 		kind, id = "chat", p.Task.ChatSessionID
 	}
+	if id == "" {
+		kind, id = "doc", p.Task.DocID
+	}
 	if p.WorkspaceID == "" || p.Task.AgentID == "" || id == "" || p.TaskID == "" {
 		return ""
 	}

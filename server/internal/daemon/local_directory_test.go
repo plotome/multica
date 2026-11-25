@@ -492,6 +492,30 @@ func TestLocalPathLockerCtxCancel(t *testing.T) {
 	}
 }
 
+func TestLocalPathLockerRejectsCancelledAcquireOnFreePath(t *testing.T) {
+	locker := NewLocalPathLocker()
+	path := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	release, err := locker.Acquire(ctx, path, "cancelled-task", nil)
+	if release != nil {
+		defer release()
+		t.Fatal("cancelled task acquired the lock")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("acquire error = %v, want context.Canceled", err)
+	}
+
+	nextCtx, cancelNext := context.WithTimeout(t.Context(), time.Second)
+	defer cancelNext()
+	release, err = locker.Acquire(nextCtx, path, "next-task", nil)
+	if err != nil {
+		t.Fatalf("acquire for next task: %v", err)
+	}
+	defer release()
+}
+
 func TestLocalPathLockerDistinctPathsParallel(t *testing.T) {
 	locker := NewLocalPathLocker()
 
@@ -1043,6 +1067,15 @@ func TestAcquireLocalDirectoryLockSkipsWorktreeMode(t *testing.T) {
 }
 
 func TestAcquireLocalDirectoryLockSerializesPersistentConversation(t *testing.T) {
+	testAcquireLocalDirectoryLockSerializesPersistentConversation(t, string(execenv.GCKindIssue))
+}
+
+func TestAcquireLocalDirectoryLockSerializesPersistentDocConversation(t *testing.T) {
+	testAcquireLocalDirectoryLockSerializesPersistentConversation(t, string(execenv.GCKindDoc))
+}
+
+func testAcquireLocalDirectoryLockSerializesPersistentConversation(t *testing.T, kind string) {
+	t.Helper()
 	const daemonID = "d-mine"
 	repo := createDaemonTestRepo(t)
 	raw, err := json.Marshal(localDirectoryRef{
@@ -1057,6 +1090,10 @@ func TestAcquireLocalDirectoryLockSerializesPersistentConversation(t *testing.T)
 	task := Task{
 		ID: "task-a", WorkspaceID: "workspace-a", AgentID: "agent-a", IssueID: "issue-a",
 		ProjectResources: resources,
+	}
+	conversationID := task.IssueID
+	if kind == string(execenv.GCKindDoc) {
+		task.DocID, task.IssueID = conversationID, ""
 	}
 	d := &Daemon{
 		cfg: Config{
@@ -1073,7 +1110,7 @@ func TestAcquireLocalDirectoryLockSerializesPersistentConversation(t *testing.T)
 		t.Fatalf("persistent acquisition: release=%v abort=%v", release != nil, abort)
 	}
 	entry, err := execenv.PersistentLocalWorktreeEntryPath(
-		d.cfg.WorkspacesRoot, repo, task.WorkspaceID, task.AgentID, string(execenv.GCKindIssue), task.IssueID,
+		d.cfg.WorkspacesRoot, repo, task.WorkspaceID, task.AgentID, kind, conversationID,
 	)
 	if err != nil {
 		t.Fatalf("derive entry: %v", err)

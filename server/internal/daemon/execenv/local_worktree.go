@@ -471,7 +471,12 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 
 	// Self-heal registrations orphaned by a crashed daemon: their env roots are
 	// long gone, but the user's repo still lists them. Prune only drops entries
-	// whose directory no longer exists, so it can never disturb a live task.
+	// whose directory no longer exists, so it can never disturb a live task. It
+	// skips locked entries, so first drop the lock an interrupted add left on the
+	// path this task is about to use.
+	if !existingPersistent {
+		unlockInterruptedWorktree(gitRoot, worktreePath, logger)
+	}
 	if out, pruneErr := runGit(gitRoot, "worktree", "prune"); pruneErr != nil && logger != nil {
 		logger.Warn("execenv: git worktree prune failed (non-fatal)",
 			"git_root", gitRoot, "output", out, "error", pruneErr)
@@ -535,7 +540,7 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 				return nil, fmt.Errorf("execenv: create persistent local worktree entry: %w", err)
 			}
 		}
-		actualBranch, createdBranch, err = addLocalWorktree(gitRoot, worktreePath, plan, params.TaskID)
+		actualBranch, createdBranch, err = addLocalWorktree(gitRoot, worktreePath, plan, params.TaskID, logger)
 		if err != nil {
 			if persistent {
 				_ = os.RemoveAll(persistentEntryRoot)
@@ -1302,6 +1307,7 @@ func worktreeIsDirty(worktreePath string) (bool, error) {
 // deletes its directory. The branch is deliberately left alone — it is the
 // task's deliverable.
 func removeLocalWorktreeDir(gitRoot, worktreePath string, logger *slog.Logger) error {
+	unlockInterruptedWorktree(gitRoot, worktreePath, logger)
 	var removeErr error
 	if out, err := runGit(gitRoot, "worktree", "remove", "--force", worktreePath); err != nil {
 		removeErr = err
@@ -1333,6 +1339,61 @@ func removeLocalWorktreeDir(gitRoot, worktreePath string, logger *slog.Logger) e
 		return fmt.Errorf("worktree directory still exists after removal fallback: %w", removeErr)
 	}
 	return errors.New("worktree directory still exists after git removal reported success")
+}
+
+// initializingLockReason is the lock `git worktree add` holds on a registration
+// until its checkout is complete. Git drops it on success and on an orderly
+// failure, so it only outlives a git that was killed.
+const initializingLockReason = "initializing"
+
+// unlockInterruptedWorktree drops git's own lock from the registration of
+// worktreePath, so `worktree remove` and `worktree prune` can clear it. Any
+// other lock was placed on purpose and is kept. Caller holds the repository
+// lock, so no other task can be inside an add at this path.
+func unlockInterruptedWorktree(gitRoot, worktreePath string, logger *slog.Logger) {
+	out, err := runGit(gitRoot, "worktree", "list", "--porcelain")
+	if err != nil {
+		if logger != nil {
+			logger.Warn("execenv: list worktrees failed (non-fatal)", "git_root", gitRoot, "output", out, "error", err)
+		}
+		return
+	}
+	want := resolveExistingPrefix(worktreePath)
+	registered := ""
+	for _, line := range strings.Split(out, "\n") {
+		if path, ok := strings.CutPrefix(line, "worktree "); ok {
+			registered = path
+			continue
+		}
+		if line != "locked "+initializingLockReason || resolveExistingPrefix(registered) != want {
+			continue
+		}
+		if out, err := runGit(gitRoot, "worktree", "unlock", registered); err != nil {
+			if logger != nil {
+				logger.Warn("execenv: unlock interrupted worktree failed (non-fatal)", "path", registered, "output", out, "error", err)
+			}
+		} else if logger != nil {
+			logger.Warn("execenv: cleared the lock an interrupted git worktree add left behind", "path", registered)
+		}
+		return
+	}
+}
+
+// resolveExistingPrefix resolves symlinks in the part of path that exists. The
+// worktree directory itself may already be gone while its registration remains.
+func resolveExistingPrefix(path string) string {
+	rest := ""
+	for dir := filepath.Clean(path); ; {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return filepath.Clean(path)
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+		dir = parent
+	}
 }
 
 // deleteBranch drops a task branch that carries nothing worth keeping — an
@@ -1764,8 +1825,22 @@ func branchOwnedBy(gitRoot, branch string, owner branchOwner, logger *slog.Logge
 // git allows one worktree per branch, and refusing to run is worse than
 // delivering onto a task-scoped branch. It forks from the same base, so the
 // sibling still stands on the conversation's latest work.
-func addLocalWorktree(gitRoot, worktreePath string, plan taskBranchPlan, taskID string) (string, bool, error) {
+//
+// A git killed mid-add (gitTimeout) cannot undo itself, so every failure here
+// also removes the registration, the partial checkout and the branch this call
+// created. Leaving the registration fails every later add at the same path with
+// "missing but locked worktree".
+func addLocalWorktree(gitRoot, worktreePath string, plan taskBranchPlan, taskID string, logger *slog.Logger) (string, bool, error) {
+	fail := func(newBranch string, out string, err error) (string, bool, error) {
+		removeLocalWorktreeDir(gitRoot, worktreePath, logger)
+		if newBranch != "" {
+			deleteBranch(gitRoot, newBranch, logger)
+		}
+		return "", false, fmt.Errorf("execenv: git worktree add: %s: %w", strings.TrimSpace(out), err)
+	}
+
 	var args []string
+	newBranch := ""
 	switch {
 	case plan.continues:
 		args = []string{"worktree", "add", worktreePath, plan.name}
@@ -1775,13 +1850,16 @@ func addLocalWorktree(gitRoot, worktreePath string, plan taskBranchPlan, taskID 
 		args = []string{"worktree", "add", "-B", plan.name, worktreePath, plan.base}
 	default:
 		args = []string{"worktree", "add", "-b", plan.name, worktreePath, plan.base}
+		if branchAbsent(gitRoot, plan.name) {
+			newBranch = plan.name
+		}
 	}
 	out, err := runGit(gitRoot, args...)
 	if err == nil {
 		return plan.name, !plan.continues, nil
 	}
 	if !branchUnavailable(out) {
-		return "", false, fmt.Errorf("execenv: git worktree add: %s: %w", strings.TrimSpace(out), err)
+		return fail(newBranch, out, err)
 	}
 	// The fallback name can itself be taken — by this same task. The
 	// conversation fallback is deterministic (<branch>-<task key>) and the
@@ -1802,15 +1880,28 @@ func addLocalWorktree(gitRoot, worktreePath string, plan taskBranchPlan, taskID 
 		case i > 1:
 			name = fmt.Sprintf("%s-%d-%d", alt, stamp, i)
 		}
+		newBranch = ""
+		if branchAbsent(gitRoot, name) {
+			newBranch = name
+		}
 		out, err = runGit(gitRoot, "worktree", "add", "-b", name, worktreePath, plan.base)
 		if err == nil {
 			return name, true, nil
 		}
 		if !branchUnavailable(out) {
-			break
+			return fail(newBranch, out, err)
 		}
 	}
-	return "", false, fmt.Errorf("execenv: git worktree add: %s: %w", strings.TrimSpace(out), err)
+	return fail("", out, err)
+}
+
+// branchAbsent reports whether git positively says the branch does not exist. A
+// probe that could not run is not evidence of absence: the caller deletes the
+// branch on rollback.
+func branchAbsent(gitRoot, branch string) bool {
+	_, err := runGit(gitRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 }
 
 // maxFallbackBranchAttempts caps how many fallback names addLocalWorktree tries
@@ -2739,6 +2830,10 @@ func runGitEnv(dir string, extraEnv []string, args ...string) (string, error) {
 	}
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		// "signal: killed" alone reads as an outside kill.
+		err = fmt.Errorf("git timed out after %s: %w", gitTimeout, err)
+	}
 	return string(out), err
 }
 

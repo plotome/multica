@@ -607,9 +607,11 @@ func launchAgentPlistContent(spec autostartSpec, label string) string {
 		b.WriteString("\t</dict>\n")
 	}
 	b.WriteString("\t<key>RunAtLoad</key>\n\t<true/>\n")
-	// Background process type: a poll/websocket daemon wants neither App Nap
-	// nor full user-interactive QoS.
-	b.WriteString("\t<key>ProcessType</key>\n\t<string>Background</string>\n")
+	// The daemon itself only polls, but every git command and agent it starts
+	// inherits its process type. Background throttles their disk I/O and, on
+	// Apple silicon, keeps them on efficiency cores, so task preparation ran into
+	// its own timeouts. Interactive leaves them unrestricted.
+	b.WriteString("\t<key>ProcessType</key>\n\t<string>Interactive</string>\n")
 	b.WriteString("</dict>\n</plist>\n")
 	return b.String()
 }

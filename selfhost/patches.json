@@ -87,6 +87,8 @@
         "TestPersistentLocalWorktreeRetryAfterPreparationTimeout",
         "TestLocalWorktreeRetriesAfterKilledWorktreeAdd",
         "TestPersistentLocalWorktreeClearsMissingInitializingRegistration",
+        "TestLocalWorktreePrepareSpawnsDoNotGrowWithBranches",
+        "TestPersistentLocalWorktreeFallbackBranchStaysReadable",
         "TestRunTaskWorktreeQueueDoesNotSpendPrepareBudget",
         "TestPersistentLocalWorktreeReusesPhysicalCheckoutAndRefreshesUserState",
         "TestPersistentLocalWorktreeChangesProjectDirectory",

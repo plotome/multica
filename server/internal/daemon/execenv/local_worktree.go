@@ -1747,6 +1747,13 @@ func resolveTaskBranch(gitRoot string, params LocalWorktreeParams, headSHA strin
 				"git_root", gitRoot, "branch", name)
 		}
 	}
+	if params.PersistentRoot != "" {
+		// The checkout outlives this task, so the next turn has to prove both
+		// its record and this branch belong to the conversation. Without the
+		// owner it would reject the record and never start again.
+		taskScoped.owner = owner
+		taskScoped.tracksState = true
+	}
 	return taskScoped
 }
 
@@ -2659,6 +2666,17 @@ func pruneOrphanedStateRefs(gitRoot string, logger *slog.Logger) {
 		}
 		return
 	}
+	// One listing, not one git process per ref: this runs under the repository
+	// lock on every prepare, and the refs accumulate with every conversation.
+	// Listed after the refs above, and without it nothing is dropped: a listing
+	// that failed is not evidence that a branch is gone.
+	branches, err := localBranches(gitRoot)
+	if err != nil {
+		if logger != nil {
+			logger.Debug("execenv: could not list branches", "git_root", gitRoot, "error", err)
+		}
+		return
+	}
 	for _, ref := range strings.Split(out, "\n") {
 		ref = strings.TrimSpace(ref)
 		if ref == "" {
@@ -2668,7 +2686,7 @@ func pruneOrphanedStateRefs(gitRoot string, logger *slog.Logger) {
 		if branch == ref {
 			continue
 		}
-		if _, headErr := runGit(gitRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); headErr == nil {
+		if branches[branch] {
 			continue
 		}
 		if out, delErr := runGit(gitRoot, "update-ref", "-d", ref); delErr != nil {
@@ -2686,6 +2704,21 @@ func pruneOrphanedStateRefs(gitRoot string, logger *slog.Logger) {
 	pruneOrphanedLeftoverRefs(gitRoot, logger)
 }
 
+// localBranches returns the names of every local branch.
+func localBranches(gitRoot string) (map[string]bool, error) {
+	out, err := runGitTrimmed(gitRoot, "for-each-ref", "--format=%(refname)", "refs/heads")
+	if err != nil {
+		return nil, err
+	}
+	branches := make(map[string]bool)
+	for _, ref := range strings.Split(out, "\n") {
+		if name, ok := strings.CutPrefix(strings.TrimSpace(ref), "refs/heads/"); ok {
+			branches[name] = true
+		}
+	}
+	return branches, nil
+}
+
 // pruneOrphanedLeftoverRefs is pruneOrphanedStateRefs for the leftovers saved
 // on a branch: once the user has deleted or merged the branch away, they go
 // with it, for the same reason — each one pins a whole tree against `git gc`.
@@ -2694,6 +2727,17 @@ func pruneOrphanedLeftoverRefs(gitRoot string, logger *slog.Logger) {
 	if err != nil {
 		if logger != nil {
 			logger.Debug("execenv: could not list leftover refs", "git_root", gitRoot, "error", err)
+		}
+		return
+	}
+	if out == "" {
+		return
+	}
+	// See pruneOrphanedStateRefs: one listing, and no listing drops nothing.
+	branches, err := localBranches(gitRoot)
+	if err != nil {
+		if logger != nil {
+			logger.Debug("execenv: could not list branches", "git_root", gitRoot, "error", err)
 		}
 		return
 	}
@@ -2710,7 +2754,7 @@ func pruneOrphanedLeftoverRefs(gitRoot string, logger *slog.Logger) {
 			continue
 		}
 		branch := rest[:cut]
-		if _, headErr := runGit(gitRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); headErr == nil {
+		if branches[branch] {
 			continue
 		}
 		if out, delErr := runGit(gitRoot, "update-ref", "-d", ref); delErr != nil {

@@ -9420,7 +9420,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		agentEnv["MULTICA_DSH_SESSION_ROOT"] = dshSessionRoot
 		agentEnv["DSH_TELEMETRY_DISABLED"] = "1"
 	}
-	taskWarmPool := selectTaskWarmPool(d.warmPool, usesCustomProfileCommand)
+	taskWarmPool := selectTaskWarmPool(d.warmPool, usesCustomProfileCommand, env.LocalWorktree != nil)
 	if provider == "codex" {
 		taskWarmPool = nil
 	}
@@ -11964,12 +11964,20 @@ func codexShellAuthorizedCustomEnvNames(customEnv map[string]string) []string {
 }
 
 // selectTaskWarmPool returns the daemon's warm session pool only for built-in
-// runtimes. Custom runtime profile commands (wrappers, version-pinned shims,
-// sandbox launchers) always launch cold so startup wrappers can read per-task
-// variables such as MULTICA_TOKEN and MULTICA_TASK_ID directly from the process
-// environment.
-func selectTaskWarmPool(pool *agent.WarmSessionPool, usesCustomProfileCommand bool) *agent.WarmSessionPool {
-	if usesCustomProfileCommand {
+// runtimes on durable workdirs. Custom runtime profile commands (wrappers,
+// version-pinned shims, sandbox launchers) always launch cold so startup
+// wrappers can read per-task variables such as MULTICA_TOKEN and
+// MULTICA_TASK_ID directly from the process environment.
+//
+// Worktree-mode local_directory tasks never pool either. In task-scoped
+// mode, a parked provider keeps its working directory inside the checkout
+// that Finalize removes; Windows refuses that removal while the process is
+// alive. Apply the same cold-process policy to persistent worktrees so the
+// lifecycle override cannot leave a pooled process pinning a checkout that
+// cleanup needs to remove. Persistent checkout and session identity still
+// survive across turns. Codex always launches cold independently of this gate.
+func selectTaskWarmPool(pool *agent.WarmSessionPool, usesCustomProfileCommand, worktreeMode bool) *agent.WarmSessionPool {
+	if usesCustomProfileCommand || worktreeMode {
 		return nil
 	}
 	return pool

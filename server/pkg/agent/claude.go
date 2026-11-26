@@ -433,8 +433,18 @@ type claudeTurn struct {
 	// before this turn's own command started is not this turn's answer.
 	// Once the own command starts, every result counts, whatever other
 	// commands do meanwhile (folded in, cancelled).
-	otherCommandStarted      bool
-	ownCommandStarted        bool
+	otherCommandStarted bool
+	ownCommandStarted   bool
+	// A one-shot process outlives its turn while a background task it
+	// started (Monitor, run_in_background) runs, and opens a turn of its own
+	// when the task reports. That turn still sends the SDK hook callbacks; a
+	// callback that cannot be answered because stdin is closed cancels the
+	// tool call with Claude Code's "The user doesn't want to take this action"
+	// text. So stdin stays open while tasks run or a notification turn is due.
+	backgroundTasks          int
+	notificationPending      bool
+	inputCloseDeferred       bool
+	turnActive               bool
 	lastAssistantText        string
 	finalResultText          string
 	sawResult                bool
@@ -457,6 +467,10 @@ type claudeTurn struct {
 func (t *claudeTurn) handleMessage(msg claudeSDKMessage) {
 	t.mu.Lock()
 	t.eventCount++
+	switch msg.Type {
+	case "stream_event", "assistant", "user", "control_request":
+		t.turnActive = true
+	}
 	switch msg.Type {
 	case "stream_event":
 		if msg.ParentToolUseID == "" {
@@ -494,8 +508,12 @@ func (t *claudeTurn) handleMessage(msg claudeSDKMessage) {
 		if msg.Subtype == claudeSubtypeModelRefusalNoFallback && msg.ParentToolUseID == "" {
 			t.sawRefusalNoFallback = true
 		}
+		closeInput := t.noteBackgroundTaskEventLocked(msg)
 		sid := t.sessionID
 		t.mu.Unlock()
+		if closeInput {
+			t.closeInputAfterControls()
+		}
 		trySend(t.msgCh, Message{Type: MessageStatus, Status: "running", SessionID: sid})
 	case "command_lifecycle":
 		if msg.State == "started" && !t.ownCommandStarted {
@@ -512,15 +530,23 @@ func (t *claudeTurn) handleMessage(msg claudeSDKMessage) {
 		t.mu.Unlock()
 	case "result":
 		t.coalescer.flushAll()
-		if t.otherCommandStarted && !t.ownCommandStarted {
+		// A result carrying an origin answers a command Claude Code queued
+		// itself (a background task's notification); on --resume an orphaned
+		// task's notification is answered before the queued prompt starts.
+		if !t.ownCommandStarted && (t.otherCommandStarted || (!t.sawResult && msg.Origin != nil && msg.Origin.Kind != "")) {
 			t.mu.Unlock()
 			t.backend.cfg.Logger.Info("claude: ignoring result of a command this turn did not send",
 				"turn_command_uuid", t.commandUUID,
+				"result_origin", msg.Origin.kind(),
 				"result_bytes", len(msg.ResultText),
 				"is_error", msg.IsError,
 			)
 			return
 		}
+		t.notificationPending = false
+		t.turnActive = false
+		holdInput := t.backgroundTasks > 0
+		t.inputCloseDeferred = holdInput
 		t.sawResult = true
 		t.finalResultText = msg.ResultText
 		t.resultIsError = msg.IsError
@@ -560,8 +586,13 @@ func (t *claudeTurn) handleMessage(msg claudeSDKMessage) {
 		if !t.proc.pooled {
 			// Keep draining stdout while accepted control replies finish
 			// writing. Once those replies drain, stdin closes; requests
-			// arriving after that cannot be answered.
-			t.closeInputAfterControls()
+			// arriving after that cannot be answered. While background tasks
+			// run, the process will open more turns, so only supplements end.
+			if holdInput && !failed {
+				t.endInitializer()
+			} else {
+				t.closeInputAfterControls()
+			}
 			if failed {
 				t.stopAfterErrorResultOnce.Do(func() { go t.proc.stopAfterErrorResult() })
 			}
@@ -610,6 +641,46 @@ func (t *claudeTurn) handleMessage(msg claudeSDKMessage) {
 	default:
 		t.mu.Unlock()
 	}
+}
+
+type claudeResultOrigin struct {
+	Kind string `json:"kind"`
+}
+
+func (o *claudeResultOrigin) kind() string {
+	if o == nil {
+		return ""
+	}
+	return o.Kind
+}
+
+const (
+	claudeSubtypeBackgroundTasksChanged = "background_tasks_changed"
+	claudeSubtypeTaskNotification       = "task_notification"
+)
+
+// noteBackgroundTaskEventLocked tracks a one-shot process's background work
+// after its turn's result and reports whether stdin can close now: the
+// process is between turns, no task runs, and no notification turn is due.
+// A notification that arrives during a turn is folded into it, so the next
+// result clears notificationPending. Called with t.mu held.
+func (t *claudeTurn) noteBackgroundTaskEventLocked(msg claudeSDKMessage) bool {
+	switch msg.Subtype {
+	case claudeSubtypeTaskNotification:
+		t.notificationPending = true
+	case claudeSubtypeBackgroundTasksChanged:
+		t.backgroundTasks = len(msg.Tasks)
+	default:
+		return false
+	}
+	if t.proc == nil || t.proc.pooled || !t.inputCloseDeferred {
+		return false
+	}
+	if t.turnActive || t.backgroundTasks > 0 || t.notificationPending {
+		return false
+	}
+	t.inputCloseDeferred = false
+	return true
 }
 
 func (t *claudeTurn) noteInvalidEvent() {
@@ -1047,6 +1118,13 @@ type claudeSDKMessage struct {
 	// command_lifecycle fields
 	CommandUUID string `json:"command_uuid,omitempty"`
 	State       string `json:"state,omitempty"`
+
+	// Origin is set on the result of a command Claude Code queued itself,
+	// such as a background task notification ("task-notification").
+	Origin *claudeResultOrigin `json:"origin,omitempty"`
+	// Tasks lists the running background tasks on a
+	// background_tasks_changed system event.
+	Tasks []json.RawMessage `json:"tasks,omitempty"`
 
 	// control request fields
 	RequestID string          `json:"request_id,omitempty"`

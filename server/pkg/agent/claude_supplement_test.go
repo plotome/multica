@@ -32,6 +32,46 @@ func claudeSupplementHook(event, agentID string) claudeSDKMessage {
 	return claudeSDKMessage{Type: "control_request", RequestID: "hook-request", Request: request}
 }
 
+func TestClaudeCancellationContextIsDeliveredToMainPrompt(t *testing.T) {
+	s := newClaudeSupplementSession(t.Context())
+	t.Cleanup(s.end)
+	for _, step := range []struct {
+		agentID     string
+		wantContext bool
+	}{{"child", false}, {"", true}, {"", false}} {
+		var wire bytes.Buffer
+		if handled, err := s.handleHook(claudeSupplementHook("UserPromptSubmit", step.agentID), &wire); !handled || err != nil {
+			t.Fatalf("hook: handled=%v err=%v", handled, err)
+		}
+		var frame struct {
+			Response struct {
+				Response struct {
+					Decision string `json:"decision"`
+					Hook     struct {
+						Context string `json:"additionalContext"`
+					} `json:"hookSpecificOutput"`
+				} `json:"response"`
+			} `json:"response"`
+		}
+		if err := json.Unmarshal(wire.Bytes(), &frame); err != nil {
+			t.Fatal(err)
+		}
+		text := frame.Response.Response.Hook.Context
+		if step.wantContext {
+			for _, fragment := range []string{"The user doesn't want to take this action", "SDK hook", "not evidence", "Honor explicit user stop", "does not authorize retries"} {
+				if !strings.Contains(text, fragment) {
+					t.Errorf("missing %q in runtime explanation: %q", fragment, text)
+				}
+			}
+		} else if text != "" {
+			t.Fatalf("unexpected repeated or subagent context: %q", text)
+		}
+		if frame.Response.Response.Decision != "" {
+			t.Fatal("runtime explanation must not block or resume the turn")
+		}
+	}
+}
+
 func activeClaudeSupplementSession(t *testing.T) *claudeSupplementSession {
 	t.Helper()
 	s := newClaudeSupplementSession(t.Context())

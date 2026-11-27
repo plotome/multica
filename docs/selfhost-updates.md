@@ -15,6 +15,11 @@ branch but omitted from the integration line. Compiling that line did not detect
 the lost capability. The manifest explicitly retains that original commit;
 copying its files without preserving ancestry is not the repair.
 
+Claude task hooks keep input open for background notification turns. On the
+main prompt, they also explain that CLI tool-cancellation wording does not
+establish human intent: a lost SDK hook connection can produce it. This context
+does not override explicit user stops or authorize retries or permission bypasses.
+
 ## Update procedure
 
 1. Read the deployed build identity and lifecycle configuration. Do not assume

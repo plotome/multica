@@ -32,46 +32,6 @@ func claudeSupplementHook(event, agentID string) claudeSDKMessage {
 	return claudeSDKMessage{Type: "control_request", RequestID: "hook-request", Request: request}
 }
 
-func TestClaudeCancellationContextIsDeliveredToMainPrompt(t *testing.T) {
-	s := newClaudeSupplementSession(t.Context())
-	t.Cleanup(s.end)
-	for _, step := range []struct {
-		agentID     string
-		wantContext bool
-	}{{"child", false}, {"", true}, {"", false}} {
-		var wire bytes.Buffer
-		if handled, err := s.handleHook(claudeSupplementHook("UserPromptSubmit", step.agentID), &wire); !handled || err != nil {
-			t.Fatalf("hook: handled=%v err=%v", handled, err)
-		}
-		var frame struct {
-			Response struct {
-				Response struct {
-					Decision string `json:"decision"`
-					Hook     struct {
-						Context string `json:"additionalContext"`
-					} `json:"hookSpecificOutput"`
-				} `json:"response"`
-			} `json:"response"`
-		}
-		if err := json.Unmarshal(wire.Bytes(), &frame); err != nil {
-			t.Fatal(err)
-		}
-		text := frame.Response.Response.Hook.Context
-		if step.wantContext {
-			for _, fragment := range []string{"The user doesn't want to take this action", "SDK hook", "not evidence", "Honor explicit user stop", "does not authorize retries"} {
-				if !strings.Contains(text, fragment) {
-					t.Errorf("missing %q in runtime explanation: %q", fragment, text)
-				}
-			}
-		} else if text != "" {
-			t.Fatalf("unexpected repeated or subagent context: %q", text)
-		}
-		if frame.Response.Response.Decision != "" {
-			t.Fatal("runtime explanation must not block or resume the turn")
-		}
-	}
-}
-
 func activeClaudeSupplementSession(t *testing.T) *claudeSupplementSession {
 	t.Helper()
 	s := newClaudeSupplementSession(t.Context())
@@ -264,6 +224,60 @@ func TestClaudeSupplementRunEndReleasesPending(t *testing.T) {
 type failedClaudeInput struct{}
 
 func (failedClaudeInput) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestClaudeHookReplyFailureReportsRuntimeSource(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		fail      bool
+		cancelled bool
+	}{{"healthy", false, false}, {"transport failure", true, false}, {"upstream cancellation", true, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tc.cancelled {
+				cancel()
+			}
+			var wire bytes.Buffer
+			var writer io.Writer = &wire
+			if tc.fail {
+				writer = failedClaudeInput{}
+			}
+			turn := &claudeTurn{
+				supplements:   newClaudeSupplementSession(ctx),
+				proc:          &claudeProcess{inputWriter: &claudeInputWriter{w: writer}},
+				cancel:        cancel,
+				controlErrors: make(chan error, 1),
+			}
+			turn.handleMessage(claudeSupplementHook("PreToolUse", ""))
+			turn.controlWrites.Wait()
+			select {
+			case err := <-turn.controlErrors:
+				if !tc.fail {
+					t.Fatalf("successful hook produced failure: %v", err)
+				}
+				if !errors.Is(err, io.ErrClosedPipe) {
+					t.Fatalf("lost transport cause: %v", err)
+				}
+				if tc.cancelled && strings.Contains(err.Error(), "source=runtime") {
+					t.Fatalf("upstream cancellation was attributed to runtime: %v", err)
+				}
+				if !tc.cancelled && (!strings.Contains(err.Error(), "source=runtime") || !strings.Contains(err.Error(), "hook-request")) {
+					t.Fatalf("missing failure provenance: %v", err)
+				}
+			default:
+				if tc.fail {
+					t.Fatal("hook write failure was not reported")
+				}
+			}
+			if (ctx.Err() != nil) != (tc.fail || tc.cancelled) {
+				t.Fatalf("cancellation = %v, case = %+v", ctx.Err(), tc)
+			}
+			if !tc.fail && strings.Contains(wire.String(), "runtime diagnostic") {
+				t.Fatal("healthy hook injected unsolicited guidance")
+			}
+		})
+	}
+}
 
 func TestClaudeSupplementWriteFailureIsNotDelivery(t *testing.T) {
 	s := activeClaudeSupplementSession(t)

@@ -15,10 +15,10 @@ branch but omitted from the integration line. Compiling that line did not detect
 the lost capability. The manifest explicitly retains that original commit;
 copying its files without preserving ancestry is not the repair.
 
-Claude task hooks keep input open for background notification turns. On the
-main prompt, they also explain that CLI tool-cancellation wording does not
-establish human intent: a lost SDK hook connection can produce it. This context
-does not override explicit user stops or authorize retries or permission bypasses.
+Claude SDK hook reply write failures report `source=runtime` and the request ID
+at the failing write. The provider preserves the transport cause and fails the
+task as an input/control protocol error, rather than a user cancellation.
+Tool-result wording alone does not establish a cancellation's source.
 
 ## Update procedure
 

@@ -218,10 +218,12 @@
       "id": "claude-background-turn-hook-input",
       "introduced_by": "49c814745e736fdcdaa73966c907f139404fd86f",
       "required_files": [
-        "server/pkg/agent/claude_background_turn_test.go"
+        "server/pkg/agent/claude_background_turn_test.go",
+        "server/pkg/agent/claude_supplement_test.go"
       ],
       "required_tests": [
-        "TestClaudeBackgroundTurnKeepsHookInputOpen"
+        "TestClaudeBackgroundTurnKeepsHookInputOpen",
+        "TestClaudeHookReplyFailureReportsRuntimeSource"
       ]
     }
   ]

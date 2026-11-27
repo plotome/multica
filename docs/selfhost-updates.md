@@ -15,6 +15,11 @@ branch but omitted from the integration line. Compiling that line did not detect
 the lost capability. The manifest explicitly retains that original commit;
 copying its files without preserving ancestry is not the repair.
 
+Claude SDK hook reply write failures report `source=runtime` and the request ID
+at the failing write. The provider preserves the transport cause and fails the
+task as an input/control protocol error, rather than a user cancellation.
+Tool-result wording alone does not establish a cancellation's source.
+
 ## Update procedure
 
 1. Read the deployed build identity and lifecycle configuration. Do not assume

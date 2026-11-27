@@ -625,6 +625,9 @@ func (t *claudeTurn) handleMessage(msg claudeSDKMessage) {
 				return
 			}
 			if err := reply(t.proc.inputWriter); err != nil {
+				if supplements.ctx.Err() == nil {
+					err = fmt.Errorf("claude SDK hook reply failed (source=runtime, request_id=%s): %w", msg.RequestID, err)
+				}
 				select {
 				case t.controlErrors <- err:
 				default:

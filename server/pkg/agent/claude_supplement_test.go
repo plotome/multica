@@ -225,6 +225,60 @@ type failedClaudeInput struct{}
 
 func (failedClaudeInput) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 
+func TestClaudeHookReplyFailureReportsRuntimeSource(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		fail      bool
+		cancelled bool
+	}{{"healthy", false, false}, {"transport failure", true, false}, {"upstream cancellation", true, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tc.cancelled {
+				cancel()
+			}
+			var wire bytes.Buffer
+			var writer io.Writer = &wire
+			if tc.fail {
+				writer = failedClaudeInput{}
+			}
+			turn := &claudeTurn{
+				supplements:   newClaudeSupplementSession(ctx),
+				proc:          &claudeProcess{inputWriter: &claudeInputWriter{w: writer}},
+				cancel:        cancel,
+				controlErrors: make(chan error, 1),
+			}
+			turn.handleMessage(claudeSupplementHook("PreToolUse", ""))
+			turn.controlWrites.Wait()
+			select {
+			case err := <-turn.controlErrors:
+				if !tc.fail {
+					t.Fatalf("successful hook produced failure: %v", err)
+				}
+				if !errors.Is(err, io.ErrClosedPipe) {
+					t.Fatalf("lost transport cause: %v", err)
+				}
+				if tc.cancelled && strings.Contains(err.Error(), "source=runtime") {
+					t.Fatalf("upstream cancellation was attributed to runtime: %v", err)
+				}
+				if !tc.cancelled && (!strings.Contains(err.Error(), "source=runtime") || !strings.Contains(err.Error(), "hook-request")) {
+					t.Fatalf("missing failure provenance: %v", err)
+				}
+			default:
+				if tc.fail {
+					t.Fatal("hook write failure was not reported")
+				}
+			}
+			if (ctx.Err() != nil) != (tc.fail || tc.cancelled) {
+				t.Fatalf("cancellation = %v, case = %+v", ctx.Err(), tc)
+			}
+			if !tc.fail && strings.Contains(wire.String(), "runtime diagnostic") {
+				t.Fatal("healthy hook injected unsolicited guidance")
+			}
+		})
+	}
+}
+
 func TestClaudeSupplementWriteFailureIsNotDelivery(t *testing.T) {
 	s := activeClaudeSupplementSession(t)
 	done := queueClaudeSupplement(t, s, t.Context(), "input", 1)

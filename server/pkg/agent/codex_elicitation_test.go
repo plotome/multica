@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/multica-ai/multica/server/pkg/protocol"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testApprovalRequest = `{"threadId":"thread","turnId":"turn","serverName":"cua_repl","mode":"form","message":"Allow access to Fixture?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","connector_id":"computer-use","tool_name":"get_app_state","riskLevel":"high","subtitle":"Review application access","persist":["session"],"tool_params":{"app":"fixture.app"}}}`
@@ -236,5 +238,42 @@ func TestCodexElicitationRejectsStaleTurnAndForgedResponse(t *testing.T) {
 		if validElicitationResponse(json.RawMessage(testApprovalRequest), json.RawMessage(response)) {
 			t.Errorf("accepted %s", response)
 		}
+	}
+}
+
+// The accepted-turn watchdog must not expire while an owner response is pending.
+func TestCodexPendingElicitationSurvivesAcceptedTurnWatchdogs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+	const watchdog = 400 * time.Millisecond
+	fakePath := writeFakeCodexAppServer(t, ""+
+		`read line`+"\n"+
+		`echo '{"jsonrpc":"2.0","id":1,"result":{}}'`+"\n"+
+		`read line`+"\n"+
+		`read line`+"\n"+
+		`echo '{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"thread"}}}'`+"\n"+
+		`read line`+"\n"+
+		`echo '{"jsonrpc":"2.0","id":3,"result":{}}'`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thread","turn":{"id":"turn"}}}'`+"\n"+
+		`echo '{"jsonrpc":"2.0","id":"application","method":"mcpServer/elicitation/request","params":`+testApprovalRequest+`}'`+"\n"+
+		`read line`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed"}}}'`+"\n")
+	result := executeFakeCodex(t, fakePath, ExecOptions{
+		Timeout: 5 * time.Second, SemanticInactivityTimeout: 2 * watchdog,
+		FirstTurnNoProgressTimeout: watchdog,
+		Elicitation: func(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+			timer := time.NewTimer(3 * watchdog)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-timer.C:
+				return json.RawMessage(`{"action":"accept","content":{}}`), nil
+			}
+		},
+	})
+	if result.Status != "completed" {
+		t.Fatalf("pending owner response expired: %+v", result)
 	}
 }

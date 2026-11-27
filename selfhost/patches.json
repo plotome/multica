@@ -72,7 +72,8 @@
         "TestNativeElicitationWithRuntimeToolMetadata",
         "TestCodexElicitationFailureReachesExactTurn",
         "TestCodexNativeElicitationExplicitChoices",
-        "TestCodexNativeElicitationDeferredStates"
+        "TestCodexNativeElicitationDeferredStates",
+        "TestCodexPendingElicitationSurvivesAcceptedTurnWatchdogs"
       ]
     },
     {

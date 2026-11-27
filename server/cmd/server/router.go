@@ -2373,6 +2373,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			r.With(handler.RequireHumanActor).Get("/api/tasks/{taskId}/elicitations", h.ListTaskElicitations)
 			r.With(handler.RequireHumanActor).Get("/api/tasks/{taskId}/elicitations/{requestId}", h.GetTaskElicitationForOwner)
 			r.With(handler.RequireHumanActor).Post("/api/tasks/{taskId}/elicitations/{requestId}/respond", h.RespondTaskElicitation)
+			r.With(handler.RequireHumanActor).Delete("/api/tasks/{taskId}/messages", h.PurgeTaskTranscript)
 			r.Get("/api/tasks/{taskId}/context-receipt", h.GetTaskContextReceipt)
 			r.With(handler.RequireHumanActor).Post("/api/tasks/{taskId}/retry-source-context", h.RetrySourceContextQuickCreate)
 

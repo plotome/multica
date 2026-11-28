@@ -73,6 +73,12 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Fetch upstream version tags
+        # Forks do not inherit newly published tags. The Desktop packager and
+        # CLI use the nearest version tag reachable from the pinned commit.
+        run: |
+          git fetch --no-tags --no-write-fetch-head https://github.com/multica-ai/multica.git \
+            'refs/tags/v*:refs/tags/v*'
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: server/go.mod

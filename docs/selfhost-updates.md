@@ -65,7 +65,8 @@ Selfhost integration integrity for the same full commit and branch before
 building with the existing Desktop packager and bundled CLI. On the integration
 branch it also requires that GitHub associates the commit with a merged pull
 request targeting that branch. The trial branch supplies an isolated installation
-candidate.
+candidate. The runner fetches upstream version tags for the existing Desktop
+and CLI version derivation. The checkout stays pinned to the tested Fork commit.
 
 The Actions artifact contains an ad-hoc signed app archive and its schema 1
 manifest. It expires after one day. Use a successful run and the exact artifact

@@ -39,9 +39,11 @@
       // header) rather than by a package script, so nothing imports it.
       // bundle-cli.node-test.mjs is run the same way. test/electron-guard.ts
       // is the `electron` alias target in vitest.config.ts, a path string
-      // knip does not follow.
+      // knip does not follow. The Air trial hook is loaded through
+      // electron-builder.air-trial.yml.
       "entry": [
         "eslint.config.mjs",
+        "scripts/air-trial-protocol.mjs",
         "src/main/*.node-test.mjs",
         "scripts/*.node-test.mjs",
         "test/electron-guard.ts"

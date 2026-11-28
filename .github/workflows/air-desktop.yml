@@ -130,3 +130,51 @@ jobs:
         with:
           subject-checksums: ${{ runner.temp }}/subjects.sha256
           create-storage-record: false
+
+  retain-latest:
+    needs: provenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: air-desktop-mainline-retention
+      cancel-in-progress: false
+    permissions:
+      actions: write
+    steps:
+      - name: Retain the newest attested mainline package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          since=$(date -u -d '14 days ago' +%F)
+          gh api --paginate --slurp --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/air-desktop.yml/runs" \
+            -f branch=main -f event=push -f "created=>=$since" -F per_page=100 > "$RUNNER_TEMP/air-runs.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+            > "$RUNNER_TEMP/air-artifacts.json"
+          jq -nr --slurpfile runs "$RUNNER_TEMP/air-runs.json" \
+            --slurpfile artifacts "$RUNNER_TEMP/air-artifacts.json" \
+            --argjson current "$GITHUB_RUN_ID" --argjson repo "$GITHUB_REPOSITORY_ID" '
+              [$runs[0][].workflow_runs[] |
+                select(.path == ".github/workflows/air-desktop.yml" and .head_branch == "main"
+                  and .event == "push" and .repository.id == $repo and .head_repository.id == $repo)] as $builds
+              | [$artifacts[0][].artifacts[] |
+                  select(.expired == false and .workflow_run.repository_id == $repo
+                    and .workflow_run.head_repository_id == $repo and .workflow_run.head_branch == "main")
+                  | . as $artifact | $builds[] | select(.id == $artifact.workflow_run.id
+                    and .head_sha == $artifact.workflow_run.head_sha)
+                  | . as $run
+                  | select($artifact.name | test("^multica-desktop-darwin-arm64-" + $run.head_sha + "-attempt-[1-9][0-9]*$"))
+                  | {artifact: $artifact, run: $run}] as $packages
+              | [$packages[] | select((.run.id == $current or .run.conclusion == "success")
+                  and .artifact.name == ("multica-desktop-darwin-arm64-" + .run.head_sha + "-attempt-" + (.run.run_attempt|tostring)))]
+                | max_by(.run.run_number) as $keep
+              | if $keep == null then error("No attested mainline artifact to retain") else
+                  $packages[] | select(.run.run_number <= $keep.run.run_number
+                    and .artifact.id != $keep.artifact.id) | .artifact.id
+                end
+            ' > "$RUNNER_TEMP/air-expire"
+          while IFS= read -r id; do
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
+            echo "Superseded mainline artifact $id" >> "$GITHUB_STEP_SUMMARY"
+          done < "$RUNNER_TEMP/air-expire"

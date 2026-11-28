@@ -1,0 +1,183 @@
+name: Mini selfhost artifacts
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    if: github.repository == 'plotome/multica'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      ci_run: ${{ steps.gate.outputs.ci }}
+      integrity_run: ${{ steps.gate.outputs.selfhost-integrity }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Require successful main push checks for this exact commit
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for workflow in ci selfhost-integrity; do
+            while true; do
+              run=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow.yml/runs" \
+                -f branch=main -f event=push -f head_sha="$GITHUB_SHA" -F per_page=1 \
+                --jq '.workflow_runs[0]')
+              if [[ -n "$run" && "$run" != null ]]; then
+                jq -e --arg sha "$GITHUB_SHA" \
+                  '.head_sha == $sha and .head_branch == "main" and .event == "push"' <<< "$run" >/dev/null
+                if [[ "$(jq -r '.status' <<< "$run")" == completed ]]; then
+                  echo "$workflow $(jq -r '.html_url + " " + .conclusion' <<< "$run")"
+                  jq -e '.conclusion == "success"' <<< "$run" >/dev/null
+                  echo "$workflow=$(jq -r '.id' <<< "$run")" >> "$GITHUB_OUTPUT"
+                  break
+                fi
+              fi
+              sleep 30
+            done
+          done
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Determine the selfhost version
+        id: version
+        run: |
+          git fetch https://github.com/multica-ai/multica.git 'refs/tags/v*:refs/tags/v*'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          version=$(git describe --tags --match 'v[0-9]*' --always --dirty)
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  images:
+    needs: checks
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      backend: ${{ steps.backend.outputs.digest }}
+      frontend: ${{ steps.frontend.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build backend and push by digest
+        id: backend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          pull: true
+          platforms: linux/arm64
+          provenance: false
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          build-args: |
+            VERSION=${{ needs.checks.outputs.version }}
+            COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=mini-backend-arm64
+          cache-to: type=gha,mode=max,scope=mini-backend-arm64
+          outputs: type=image,name=ghcr.io/plotome/multica-mini-backend,push-by-digest=true,name-canonical=true,push=true
+
+      - name: Build Web and push by digest
+        id: frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.web
+          pull: true
+          platforms: linux/arm64
+          provenance: false
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          build-args: |
+            REMOTE_API_URL=http://backend:8080
+            NEXT_PUBLIC_APP_VERSION=${{ needs.checks.outputs.version }}
+            COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=mini-web-arm64
+          cache-to: type=gha,mode=max,scope=mini-web-arm64
+          outputs: type=image,name=ghcr.io/plotome/multica-mini-web,push-by-digest=true,name-canonical=true,push=true
+
+  package:
+    needs: [checks, images]
+    runs-on: macos-15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Build CLI and bind all three artifacts to the checked source
+        env:
+          VERSION: ${{ needs.checks.outputs.version }}
+          BACKEND: ${{ needs.images.outputs.backend }}
+          FRONTEND: ${{ needs.images.outputs.frontend }}
+          CI_RUN: ${{ needs.checks.outputs.ci_run }}
+          INTEGRITY_RUN: ${{ needs.checks.outputs.integrity_run }}
+        run: |
+          set -euo pipefail
+          [[ "$(go env GOHOSTOS)/$(go env GOHOSTARCH)" == darwin/arm64 ]]
+          [[ "$BACKEND" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$FRONTEND" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir mini
+          date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          (
+            cd server
+            go build -trimpath -ldflags "-X main.version=$VERSION -X main.commit=$GITHUB_SHA -X main.buildCommit=$GITHUB_SHA -X main.date=$date" \
+              -o ../mini/multica ./cmd/multica
+          )
+          mini/multica version --output json | jq -e --arg commit "$GITHUB_SHA" --arg version "$VERSION" \
+            '.commit == $commit and .version == $version' >/dev/null
+          cli_sha=$(shasum -a 256 mini/multica | cut -d ' ' -f1)
+          jq -n --arg commit "$GITHUB_SHA" --arg version "$VERSION" --arg cli_sha "$cli_sha" \
+            --argjson run_id "$GITHUB_RUN_ID" --argjson ci_run "$CI_RUN" --argjson integrity_run "$INTEGRITY_RUN" \
+            --arg backend "$BACKEND" --arg frontend "$FRONTEND" \
+            '{schema:1, $commit, $version, $run_id, $ci_run, $integrity_run, cli_sha256:$cli_sha,
+              cli_platform:"darwin/arm64", image_platform:"linux/arm64", images:{$backend, $frontend}}' \
+            > mini/mini.json
+
+      - name: Attest the manifest containing the CLI hash and image digests
+        uses: actions/attest@v4
+        with:
+          subject-path: mini/mini.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mini-selfhost-${{ github.sha }}
+          path: mini/
+          if-no-files-found: error
+          overwrite: true

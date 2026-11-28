@@ -47,9 +47,13 @@ export function healthPortForProfile(profile: string): number {
   return DEFAULT_HEALTH_PORT + 1 + (sum % 1000);
 }
 
+export function desktopCliRoot(): string {
+  return join(process.env.MULTICA_DESKTOP_TRIAL_ROOT ?? homedir(), ".multica");
+}
+
 export function profileDir(profile: string): string {
   assertResolvedProfile(profile);
-  return join(homedir(), ".multica", "profiles", profile);
+  return join(desktopCliRoot(), "profiles", profile);
 }
 
 export function profileConfigPath(profile: string): string {

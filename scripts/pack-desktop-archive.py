@@ -63,6 +63,13 @@ def pack(app, directory, commit):
     require(identity["update_mode"] in ("manual", "coordinated"), "Unrecognized update mode")
     with (app / "Contents/Info.plist").open("rb") as stream:
         info = plistlib.load(stream)
+    if app.name == "MulticaIsolatedAirTrial.app":
+        require(info["CFBundleIdentifier"] == "cc.ploto.multica.isolated.multicaisolatedairtrial",
+                "Unexpected Air trial bundle ID")
+        schemes = {scheme for entry in info.get("CFBundleURLTypes", [])
+                   for scheme in entry.get("CFBundleURLSchemes", [])}
+        require(schemes == {"multica-air-trial"}, "Unexpected Air trial URL schemes")
+        identity["bundle_id"] = info["CFBundleIdentifier"]
     executable = info["CFBundleExecutable"]
     require(executable and Path(executable).name == executable, "Invalid Desktop executable")
     cli = resources / "bin/multica"

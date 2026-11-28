@@ -96,10 +96,16 @@ jobs:
           test "$(uname -m)" = arm64
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           pnpm install --frozen-lockfile
-          pnpm --filter @multica/desktop package -- --mac --arm64 --dir --publish never -c.mac.identity=-
+          product=Multica
+          config=()
+          if [[ "$GITHUB_REF" == refs/heads/air-desktop-actions/trial ]]; then
+            product=MulticaIsolatedAirTrial
+            config=(--config electron-builder.air-trial.yml)
+          fi
+          pnpm --filter @multica/desktop package -- --mac --arm64 --dir --publish never -c.mac.identity=- "${config[@]}"
           stage="$RUNNER_TEMP/air-desktop"
           python3 scripts/pack-desktop-archive.py \
-            --app apps/desktop/dist/mac-arm64/Multica.app --output "$stage" --commit "$GITHUB_SHA"
+            --app "apps/desktop/dist/mac-arm64/$product.app" --output "$stage" --commit "$GITHUB_SHA"
           echo "archive-digest=$(shasum -a 256 "$stage/Multica.tar.gz" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
           echo "manifest-digest=$(shasum -a 256 "$stage/manifest.json" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
           jq '{commit, version, arch, archive_bytes, archive_sha256}' "$stage/manifest.json" >> "$GITHUB_STEP_SUMMARY"

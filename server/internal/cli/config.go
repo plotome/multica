@@ -304,6 +304,14 @@ func multicaConfigRoot() (root string, taskLocal bool, err error) {
 	if err != nil {
 		return "", false, err
 	}
+	if rawRoot := os.Getenv("MULTICA_DESKTOP_TRIAL_ROOT"); rawRoot != "" {
+		expected := filepath.Join(home, "Library", "Application Support", "MulticaIsolatedAirTrial")
+		real, err := filepath.EvalSymlinks(expected)
+		if err != nil || real != expected || rawRoot != expected {
+			return "", false, fmt.Errorf("invalid Air trial configuration directory")
+		}
+		return real, false, nil
+	}
 	return home, false, nil
 }
 

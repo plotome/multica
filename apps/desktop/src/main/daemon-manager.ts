@@ -15,7 +15,7 @@ import {
   type StatsListener,
 } from "fs";
 import { join } from "path";
-import { homedir, hostname } from "os";
+import { hostname } from "os";
 import type {
   DaemonStatus,
   DaemonPrefs,
@@ -34,6 +34,7 @@ import {
 } from "./update-install-gate";
 import {
   deriveProfileName,
+  desktopCliRoot,
   profileArgs,
   profileConfigPath,
   profileDir,
@@ -64,7 +65,7 @@ import { daemonSpawnEnv } from "./daemon-spawn-env";
 import { focusEnvironmentAt, type FocusEnvironmentResult } from "./environment-focus";
 
 const POLL_INTERVAL_MS = 5_000;
-const PREFS_PATH = join(homedir(), ".multica", "desktop_prefs.json");
+const prefsPath = () => join(desktopCliRoot(), "desktop_prefs.json");
 const LOG_TAIL_RETRY_MS = 2_000;
 const LOG_TAIL_MAX_RETRIES = 5;
 // How long a start may sit in "starting" (with no /health) before we probe the
@@ -818,7 +819,7 @@ async function restartDaemonAfterUserSwitch(
 
 async function loadPrefs(): Promise<DaemonPrefs> {
   try {
-    const raw = await readFile(PREFS_PATH, "utf-8");
+    const raw = await readFile(prefsPath(), "utf-8");
     const parsed = JSON.parse(raw);
     return { ...DEFAULT_PREFS, ...parsed };
   } catch {
@@ -827,9 +828,9 @@ async function loadPrefs(): Promise<DaemonPrefs> {
 }
 
 async function savePrefs(prefs: DaemonPrefs): Promise<void> {
-  const dir = join(homedir(), ".multica");
+  const dir = desktopCliRoot();
   await mkdir(dir, { recursive: true });
-  await writeFile(PREFS_PATH, JSON.stringify(prefs, null, 2), "utf-8");
+  await writeFile(prefsPath(), JSON.stringify(prefs, null, 2), "utf-8");
 }
 
 async function clearToken(): Promise<void> {
@@ -1465,12 +1466,13 @@ export function setupDaemonManager(
     const window = windowGetter();
     return window ? [window] : [];
   },
+  fixedApiUrl?: string,
 ): void {
   getMainWindow = windowGetter;
   getStatusWindows = statusWindowsGetter;
 
   ipcMain.handle("daemon:set-target-api-url", async (_e, url: string) => {
-    const normalized = url || null;
+    const normalized = fixedApiUrl ?? (url || null);
     if (targetApiBaseUrl !== normalized) {
       console.log(`[daemon] target API URL set to ${normalized ?? "(none)"}`);
       setDesiredDaemonRunning(false);
@@ -1553,7 +1555,7 @@ export function setupDaemonManager(
         return savePrefs(merged).then(() => merged);
       }),
   );
-  ipcMain.handle("daemon:auto-start", async () => {
+  async function autoStart(): Promise<void> {
     const prefs = await loadPrefs();
     if (quitting || autoStartSuppressedAfterQuit) return;
     setDesiredDaemonRunning(prefs.autoStart);
@@ -1575,7 +1577,12 @@ export function setupDaemonManager(
       }
       await startDaemon();
     });
-  });
+  }
+  ipcMain.handle("daemon:auto-start", autoStart);
+  if (fixedApiUrl) {
+    targetApiBaseUrl = fixedApiUrl;
+    void autoStart().catch((error) => console.error("[daemon] trial startup failed", error));
+  }
 
   // One tail at a time, streamed to the window that opened the log view
   // last; a window closing its view does not stop another window's stream.

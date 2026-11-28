@@ -9,6 +9,8 @@ import {
   screen,
 } from "electron";
 import { homedir } from "os";
+import { mkdirSync, realpathSync } from "node:fs";
+import { AIR_TRIAL_NAME, AIR_TRIAL_APP_ID, AIR_TRIAL_API, startAirTrialFixture } from "./air-trial";
 import { join } from "path";
 import { pathToFileURL } from "url";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
@@ -728,9 +730,30 @@ const DEV_APP_NAME = process.env.DESKTOP_APP_SUFFIX
   : "Multica Canary";
 
 const packagedIsolationName = !is.dev && /^MulticaIsolated[A-Za-z0-9]+$/.test(app.getName()) ? app.getName() : null;
+const isAirTrial = packagedIsolationName === AIR_TRIAL_NAME;
+
 if (packagedIsolationName) {
   app.setName(packagedIsolationName);
   app.setPath("userData", join(app.getPath("appData"), packagedIsolationName));
+  if (isAirTrial) {
+    // The CLI stores its machine identity outside the profile. Give both the
+    // Desktop and its CLI children a separate home before any daemon activity.
+    if (["MULTICA_TASK_ID", "MULTICA_TASK_CONFIG_ROOT", "MULTICA_DAEMON_PORT", "MULTICA_TOKEN", "MULTICA_DAEMON_ID"]
+        .some((key) => Boolean(process.env[key]))) {
+      throw new Error("Launch the Air trial app outside a daemon task environment");
+    }
+    const trialRoot = join(realpathSync(app.getPath("appData")), packagedIsolationName);
+    mkdirSync(trialRoot, { recursive: true, mode: 0o700 });
+    if (realpathSync(trialRoot) !== trialRoot) {
+      throw new Error("The Air trial data directory must not contain symlinks");
+    }
+    app.setPath("userData", trialRoot);
+    process.env.MULTICA_DESKTOP_TRIAL_ROOT = trialRoot;
+    process.env.MULTICA_WORKSPACES_ROOT = join(trialRoot, "workspaces");
+    process.env.MULTICA_SERVER_URL = AIR_TRIAL_API;
+    process.env.MULTICA_DAEMON_AUTO_UPDATE = "false";
+    process.env.MULTICA_DAEMON_AUTO_RELOAD = "false";
+  }
 } else if (is.dev) {
   app.setName(DEV_APP_NAME);
   app.setPath("userData", join(app.getPath("appData"), DEV_APP_NAME));
@@ -807,7 +830,25 @@ if (!gotTheLock) {
       readonly VITE_DEV_TOOLBAR?: string;
     };
 
-    runtimeConfigResult = await loadRuntimeConfig({
+    if (isAirTrial) {
+      try {
+        await startAirTrialFixture();
+      } catch (error) {
+        console.error("[air-trial] fixture startup failed", error);
+        app.exit(1);
+        return;
+      }
+    }
+
+    runtimeConfigResult = isAirTrial ? {
+      ok: true,
+      config: {
+        schemaVersion: 1,
+        apiUrl: AIR_TRIAL_API,
+        wsUrl: "ws://127.0.0.1:29424/ws",
+        appUrl: AIR_TRIAL_API,
+      },
+    } : await loadRuntimeConfig({
       ...(packagedIsolationName ? {configPath: join(app.getPath("userData"), "desktop.json")} : {}),
       isDev: is.dev,
       // electron-vite exposes VITE_* on import.meta.env for the main process;
@@ -821,7 +862,7 @@ if (!gotTheLock) {
     });
 
     electronApp.setAppUserModelId(
-      is.dev ? "ai.multica.desktop.dev" : "ai.multica.desktop",
+      isAirTrial ? AIR_TRIAL_APP_ID : is.dev ? "ai.multica.desktop.dev" : "ai.multica.desktop",
     );
 
     // macOS: replace the default Electron dock icon with the bundled logo
@@ -1129,6 +1170,7 @@ if (!gotTheLock) {
     setupDaemonManager(
       () => mainWindows.mostRecent(),
       () => mainWindows.all(),
+      isAirTrial ? AIR_TRIAL_API : undefined,
     );
     setupLocalDirectory(() => mainWindows.mostRecent());
     setupThemeFolder();

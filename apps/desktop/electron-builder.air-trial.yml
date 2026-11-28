@@ -1,0 +1,10 @@
+extends: ./electron-builder.yml
+appId: cc.ploto.multica.isolated.multicaisolatedairtrial
+productName: MulticaIsolatedAirTrial
+extraMetadata:
+  name: multicaisolatedairtrial
+  productName: MulticaIsolatedAirTrial
+protocols:
+  - name: Multica Air Trial
+    schemes:
+      - multica-air-trial

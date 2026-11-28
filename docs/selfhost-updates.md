@@ -138,3 +138,16 @@ checkout contract as issue/chat runs. Doc checkout GC uses the configured
 persistent-worktree idle retention, since documents have no terminal status;
 active conversation locks protect them during execution. Delivered branches
 survive checkout collection.
+
+## Air Desktop artifact
+
+On this fork, a merged pull request to `main` triggers the Air Desktop
+workflow. Packaging starts after successful CI and Selfhost integration
+integrity push runs for the exact merge SHA. It publishes the production
+macOS arm64 bundle with its matching bundled CLI to an Actions artifact for
+up to seven days. The archive and manifest have GitHub build attestations.
+Once a newer mainline package is attested, the workflow expires the older
+mainline package to keep cloud storage bounded to the latest candidate.
+
+Use the Actions run, attempt, artifact ID and ZIP digest to verify a download.
+Consumers can use the verified archive after the GitHub copy expires.

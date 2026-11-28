@@ -97,6 +97,17 @@ a fresh checkout. Recovery directories retain commits and dirty files and are
 excluded from automatic GC; inspect them before manually removing them. Invalid
 published state still fails closed rather than being treated as an interruption.
 
+## Run log tool details
+
+Agent owners and workspace owners/admins can restrict an agent's tool details
+in its access settings. The default remains everyone who can read the run.
+Restricted readers still see tool names and timing, while inputs and outputs
+are available only to the agent owner and workspace owners/admins. Only human
+credentials can change this setting; task and plugin credentials cannot.
+The restriction applies to historical reads, live events and channel progress.
+Prose and reasoning remain visible to the run's existing audience.
+Migration 774 adds the visibility field without rewriting transcript history.
+
 ## Retiring or replacing a patch
 
 Keep the old commit in history. Use an explicit revert or replacement commit,

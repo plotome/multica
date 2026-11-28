@@ -57,6 +57,24 @@ Tool-result wording alone does not establish a cancellation's source.
    and performs the two-turn real smoke below. Only then mark delivery complete.
    If it fails, retain the evidence and keep the integration issue open.
 
+## macOS arm64 Desktop artifacts
+
+The Air Desktop package workflow runs on pushes to the fork integration branch
+and the dedicated trial branch. It waits for successful push runs of CI and
+Selfhost integration integrity for the same full commit and branch before
+building with the existing Desktop packager and bundled CLI. On the integration
+branch it also requires that GitHub associates the commit with a merged pull
+request targeting that branch. The trial branch supplies an isolated installation
+candidate.
+
+The Actions artifact contains an ad-hoc signed app archive and its schema 1
+manifest. It expires after one day. Use a successful run and the exact artifact
+ID for that attempt. Verify both files with GitHub build provenance pinned to
+this repository, `.github/workflows/air-desktop.yml`, the source ref, and the
+full source commit. Then verify the archive length and SHA-256 in the manifest
+before passing the files to the offline installer. These artifacts do not
+publish a GitHub Release or update an installed application on their own.
+
 ## Two-turn acceptance
 
 Routine upgrades do not require repeating a full code audit. Review merge

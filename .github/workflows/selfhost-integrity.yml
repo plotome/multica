@@ -2,7 +2,7 @@ name: Selfhost integration integrity
 
 on:
   push:
-    branches: [main]
+    branches: [main, air-desktop-actions/trial]
   pull_request:
     branches: [main]
 

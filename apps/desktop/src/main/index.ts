@@ -99,6 +99,8 @@ import {
   parseNativeNotificationPayload,
 } from "./notification-gate";
 
+const isAirTrial = !is.dev && app.getName() === AIR_TRIAL_NAME;
+
 configureLinuxFileDialogs(app.commandLine);
 
 // Guards against registering the will-download handler more than once on the
@@ -144,7 +146,7 @@ const BUNDLED_ICON_PATH = join(__dirname, "../../resources/icon.png").replace(
 // before any child_process.spawn / execFile call in the main process —
 // ES module imports are hoisted, so this block executes before createMainWindow
 // or any daemon-manager spawn.
-if (process.platform !== "win32") {
+if (process.platform !== "win32" && !isAirTrial) {
   fixPath();
   // Fallback: ensure common install locations are on PATH when fix-path came
   // up short (broken shell rc, non-interactive $SHELL, missing entries).
@@ -730,7 +732,6 @@ const DEV_APP_NAME = process.env.DESKTOP_APP_SUFFIX
   : "Multica Canary";
 
 const packagedIsolationName = !is.dev && /^MulticaIsolated[A-Za-z0-9]+$/.test(app.getName()) ? app.getName() : null;
-const isAirTrial = packagedIsolationName === AIR_TRIAL_NAME;
 
 if (packagedIsolationName) {
   app.setName(packagedIsolationName);

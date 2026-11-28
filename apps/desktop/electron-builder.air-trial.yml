@@ -8,3 +8,4 @@ protocols:
   - name: Multica Air Trial
     schemes:
       - multica-air-trial
+afterPack: ./scripts/air-trial-protocol.cjs
